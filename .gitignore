@@ -39,3 +39,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+node_modules
+.next
+.env.local
+.env*.local
+*.log
+.DS_Store
+
+# agent worktrees
+.claude/worktrees/

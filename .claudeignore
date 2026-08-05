@@ -1,0 +1,6 @@
+design-reference/
+.next/
+node_modules/
+public/
+*.html
+*.md
