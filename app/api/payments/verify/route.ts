@@ -145,6 +145,7 @@ export async function POST(req: NextRequest) {
     .single()
 
   if (paymentError || !payment) {
+    console.error('[payments/verify] Payment lookup failed:', { paymentId, tutorId, paymentError })
     return NextResponse.json({ error: 'Payment not found' }, { status: 404 })
   }
 

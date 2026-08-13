@@ -221,6 +221,31 @@ export async function sendPaymentReminder(
 }
 
 /**
+ * Send an overdue-payment notice to student (or parent).
+ * Called once a payment crosses the tutor's due-date + grace-period window.
+ * Distinct from sendPaymentReminder (3-day / due-date stages) so the tone
+ * can reflect that grace has already elapsed.
+ */
+export async function sendOverduePaymentReminder(
+  studentPhone: string,
+  tutorPhone: string,
+  studentName: string,
+  amountLkr: number,
+  daysOverdue: number,
+  paymentInstructions: string,
+  tutorId?: string,
+): Promise<void> {
+  const message =
+    `Hi *${studentName}*! ⚠️\n\n` +
+    `Your monthly fee of *LKR ${amountLkr.toLocaleString()}* is now *${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} overdue*.\n\n` +
+    `Payment details:\n${paymentInstructions}\n\n` +
+    `Please pay as soon as possible and send a screenshot here to confirm. Thank you! 🙏\n\n` +
+    `— ${tutorPhone}`
+
+  await sendWhatsApp(studentPhone, FROM(), message, tutorId)
+}
+
+/**
  * Send a notification message to the tutor (not the student).
  * Used for: new bookings, payment receipts, bot-stuck alerts, etc.
  */

@@ -15,6 +15,7 @@ import InviteMessage from '@/components/InviteMessage'
 import EditStudentPanel, { type EditableStudent } from '@/components/EditStudentPanel'
 import { useTutor } from '@/lib/contexts/tutor'
 import type { SubjectEntry } from '@/lib/types/subjects'
+import { computeOverdueStatus } from '@/lib/payment-status'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,7 @@ interface PendingPayment {
   id: string
   amount_lkr: number
   due_date: string | null
+  is_trial_payment: boolean
 }
 
 interface Student {
@@ -69,6 +71,21 @@ interface TutorProfile {
   name: string
   whatsapp_number: string
   monthly_due_date: number | null
+  grace_period_days: number | null
+}
+
+const CURRENT_MONTH = new Date().toISOString().slice(0, 7)
+
+// A 'pending' payment becomes effectively overdue once the tutor's current
+// due-date + grace-period settings have elapsed for this month. Delegates to
+// the shared computeOverdueStatus() helper (lib/payment-status.ts) — the
+// same function Dashboard, Payments, Batches and the cron use — so this
+// page can never disagree with them, and a Settings change is reflected
+// immediately with no extra steps. The DB 'overdue' status only gets set
+// later by the cron, so it must not be trusted as the source of truth here.
+function isPendingOverdue(pending: PendingPayment | null | undefined, monthlyDueDate: number | null, gracePeriodDays: number | null): boolean {
+  if (!pending || pending.is_trial_payment) return false
+  return computeOverdueStatus(monthlyDueDate ?? 28, gracePeriodDays ?? 999, CURRENT_MONTH, 'pending').isOverdue
 }
 
 // ── Badge helpers ─────────────────────────────────────────────────────────
@@ -357,10 +374,10 @@ export default function StudentsPage() {
       supabase.from('students').select('*')
         .eq('tutor_id', user.id).order('created_at', { ascending: false }),
 
-      supabase.from('payments').select('id, student_id, status, amount_lkr, month_year, due_date')
+      supabase.from('payments').select('id, student_id, status, amount_lkr, month_year, due_date, is_trial_payment')
         .eq('tutor_id', user.id).eq('month_year', currentMonth),
 
-      supabase.from('tutors').select('name, whatsapp_number, monthly_due_date').eq('id', user.id).single(),
+      supabase.from('tutors').select('name, whatsapp_number, monthly_due_date, grace_period_days').eq('id', user.id).single(),
 
       supabase.from('batches').select('id, name, subject, grade, monthly_fee, schedule_day, schedule_time').eq('tutor_id', user.id),
 
@@ -379,7 +396,7 @@ export default function StudentsPage() {
     }
 
     // Build lookup maps from flat results
-    type RawPayment = { id: string; student_id: string; status: string; amount_lkr: number; month_year: string | null; due_date: string | null }
+    type RawPayment = { id: string; student_id: string; status: string; amount_lkr: number; month_year: string | null; due_date: string | null; is_trial_payment: boolean | null }
     const payByStudent = new Map<string, RawPayment[]>()
     for (const p of ((paymentsRes.data ?? []) as RawPayment[])) {
       const arr = payByStudent.get(p.student_id) ?? []
@@ -441,7 +458,7 @@ export default function StudentsPage() {
           sessions_this_month: sessTotal,
           sessions_attended:   sessAttended,
           pending_payment: pendingEntry
-            ? { id: pendingEntry.id, amount_lkr: pendingEntry.amount_lkr, due_date: pendingEntry.due_date }
+            ? { id: pendingEntry.id, amount_lkr: pendingEntry.amount_lkr, due_date: pendingEntry.due_date, is_trial_payment: pendingEntry.is_trial_payment ?? false }
             : null,
         }
       })
@@ -450,9 +467,10 @@ export default function StudentsPage() {
 
     if (tutorRes.data) {
       setTutorProfile({
-        name:             tutorRes.data.name as string,
-        whatsapp_number:  tutorRes.data.whatsapp_number as string,
-        monthly_due_date: tutorRes.data.monthly_due_date as number | null,
+        name:              tutorRes.data.name as string,
+        whatsapp_number:   tutorRes.data.whatsapp_number as string,
+        monthly_due_date:  tutorRes.data.monthly_due_date as number | null,
+        grace_period_days: tutorRes.data.grace_period_days as number | null,
       })
     }
 
@@ -486,6 +504,8 @@ export default function StudentsPage() {
   const filtered = useMemo(() => {
     const qText   = searchQuery.toLowerCase()
     const qDigits = qText.replace(/\D/g, '')
+    const monthlyDueDate  = tutorProfile?.monthly_due_date  ?? null
+    const gracePeriodDays = tutorProfile?.grace_period_days ?? null
     return students.filter(s => {
       if (searchQuery) {
         const ok = s.name.toLowerCase().includes(qText)
@@ -496,17 +516,23 @@ export default function StudentsPage() {
       }
       if (atRiskFilter) {
         const isOverdue = s.current_payment_status === 'overdue'
+          || (s.current_payment_status === 'pending' && isPendingOverdue(s.pending_payment, monthlyDueDate, gracePeriodDays))
         const hasMissed = s.sessions_this_month > 0 && s.sessions_attended < s.sessions_this_month
         if (!isOverdue && !hasMissed) return false
       }
       if (statusFilter !== 'all' && s.status !== statusFilter) return false
       if (subjectFilter !== 'all' && s.subject !== subjectFilter) return false
       if (classFilter   !== 'all' && s.class_type !== classFilter)  return false
-      if (paymentFilter !== 'all' && s.current_payment_status !== paymentFilter) return false
+      if (paymentFilter !== 'all') {
+        const displayStatus = s.current_payment_status === 'pending' && isPendingOverdue(s.pending_payment, monthlyDueDate, gracePeriodDays)
+          ? 'overdue'
+          : s.current_payment_status
+        if (displayStatus !== paymentFilter) return false
+      }
       if (batchFilter   !== 'all' && s.batch_id !== batchFilter) return false
       return true
     })
-  }, [students, searchQuery, statusFilter, subjectFilter, classFilter, paymentFilter, batchFilter, atRiskFilter])
+  }, [students, searchQuery, statusFilter, subjectFilter, classFilter, paymentFilter, batchFilter, atRiskFilter, tutorProfile])
 
   const hasActiveFilters = !!(searchQuery || statusFilter !== 'all' || subjectFilter !== 'all' || classFilter !== 'all' || paymentFilter !== 'all' || batchFilter !== 'all' || atRiskFilter)
 
@@ -578,11 +604,21 @@ export default function StudentsPage() {
     setEditStudent(null)
   }
 
+  // Folds the date-based overdue check into the raw DB status — a 'pending'
+  // payment past its due date + grace period displays as overdue even though
+  // the DB row hasn't been flipped by the block-student cron yet.
+  function effectivePaymentStatus(s: Student): CurrentPayStatus {
+    if (s.current_payment_status === 'pending' && isPendingOverdue(s.pending_payment, tutorProfile?.monthly_due_date ?? null, tutorProfile?.grace_period_days ?? null)) {
+      return 'overdue'
+    }
+    return s.current_payment_status
+  }
+
   function rowAccent(s: Student) {
-    if (s.class_type === 'trial')               return 'border-l-[3px] border-l-[#7048e8]'
-    if (s.status === 'blocked')                 return 'border-l-[3px] border-l-[#c92a2a]'
-    if (s.current_payment_status === 'overdue') return 'border-l-[3px] border-l-[#c92a2a]'
-    if (s.current_payment_status === 'pending') return 'border-l-[3px] border-l-[#e67700]'
+    if (s.class_type === 'trial')                return 'border-l-[3px] border-l-[#7048e8]'
+    if (s.status === 'blocked')                  return 'border-l-[3px] border-l-[#c92a2a]'
+    if (effectivePaymentStatus(s) === 'overdue') return 'border-l-[3px] border-l-[#c92a2a]'
+    if (effectivePaymentStatus(s) === 'pending') return 'border-l-[3px] border-l-[#e67700]'
     return 'border-l-[3px] border-l-transparent'
   }
 
@@ -803,7 +839,7 @@ export default function StudentsPage() {
                         </span>
                       </td>
                       <td className="px-4 py-3.5">
-                        <PaymentCell status={student.current_payment_status} pending={student.pending_payment} monthly_fee={student.monthly_fee} />
+                        <PaymentCell status={effectivePaymentStatus(student)} pending={student.pending_payment} monthly_fee={student.monthly_fee} />
                       </td>
                       <td className="px-4 py-3.5">
                         {student.sessions_this_month > 0 ? (
@@ -895,7 +931,7 @@ export default function StudentsPage() {
 
       {editStudent && (
         <EditStudentPanel
-          student={editStudent as EditableStudent}
+          student={{ ...editStudent, current_payment_status: effectivePaymentStatus(editStudent) } as EditableStudent}
           isOpen={!!editStudent}
           onClose={() => setEditStudent(null)}
           onSave={handleStudentSaved}

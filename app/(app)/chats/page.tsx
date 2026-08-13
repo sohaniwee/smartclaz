@@ -440,7 +440,7 @@ export default function ChatsPage() {
   const needsHelpCount = conversations.filter(c => c.status === 'needs_help').length
 
   return (
-    <div className="h-[calc(100vh-5rem)] md:h-[calc(100vh-4rem)] flex flex-col gap-0 -m-5 md:-m-8">
+    <div className="h-[calc(100vh-60px)] flex flex-col gap-0 -m-5 md:-m-8">
 
       {/* Page header */}
       <div className="px-5 md:px-8 pt-5 md:pt-6 pb-4 bg-[#f6f8fc] border-b border-[#dee2e6] flex items-center justify-between flex-shrink-0">

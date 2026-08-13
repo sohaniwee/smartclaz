@@ -40,8 +40,10 @@ export interface Batch {
   enrolled_count: number
   paid_count: number
   pending_count: number
+  overdue_count: number
   collected_lkr: number
   pending_lkr: number
+  overdue_lkr: number
   students: BatchStudent[]
 }
 
@@ -458,6 +460,12 @@ function BatchCard({
                 <Clock size={11} />
                 {batch.pending_count} pending
               </span>
+              {batch.overdue_count > 0 && (
+                <span className="flex items-center gap-1 text-[#c92a2a] font-semibold">
+                  <AlertTriangle size={11} />
+                  {batch.overdue_count} overdue
+                </span>
+              )}
             </div>
             <p className="text-[0.68rem] text-[#adb5bd]">
               LKR {batch.collected_lkr.toLocaleString()} collected

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
 import { createClient } from '@/lib/supabase/server'
+import { computeOverdueStatus } from '@/lib/payment-status'
 
 type RawBatch = {
   id: string
@@ -36,6 +37,7 @@ type RawPayment = {
   status: string
   amount_lkr: number
   month_year: string | null
+  is_trial_payment: boolean | null
 }
 
 type RawWaitlist = {
@@ -62,16 +64,22 @@ export async function GET(_req: NextRequest) {
 
   const currentMonth = new Date().toISOString().slice(0, 7)
 
-  const [batchesRes, studentsRes, paymentsRes, waitlistRes] = await Promise.all([
+  const [batchesRes, studentsRes, paymentsRes, waitlistRes, tutorRes] = await Promise.all([
     supabase.from('batches').select('*').eq('tutor_id', user.id).order('created_at', { ascending: true }),
     supabase.from('students').select('id, name, whatsapp, status, monthly_fee, batch_id').eq('tutor_id', user.id).eq('class_type', 'group'),
-    supabase.from('payments').select('id, student_id, status, amount_lkr, month_year').eq('tutor_id', user.id).eq('month_year', currentMonth),
+    supabase.from('payments').select('id, student_id, status, amount_lkr, month_year, is_trial_payment').eq('tutor_id', user.id).eq('month_year', currentMonth),
     supabase.from('waitlist').select('*').eq('tutor_id', user.id).eq('status', 'waiting').order('created_at'),
+    supabase.from('tutors').select('monthly_due_date, grace_period_days').eq('id', user.id).single(),
   ])
 
   if (batchesRes.error) {
     return NextResponse.json({ error: batchesRes.error.message }, { status: 500 })
   }
+
+  // Live-computed, not read from a stored due_date column — same
+  // computeOverdueStatus() helper used by Dashboard, Students and Payments.
+  const monthlyDueDate  = (tutorRes.data?.monthly_due_date as number | null)  ?? 28
+  const gracePeriodDays = (tutorRes.data?.grace_period_days as number | null) ?? 3
 
   const payByStudent = new Map<string, RawPayment[]>()
   for (const p of ((paymentsRes.data ?? []) as RawPayment[])) {
@@ -94,8 +102,10 @@ export async function GET(_req: NextRequest) {
 
     let paid_count = 0
     let pending_count = 0
+    let overdue_count = 0
     let collected_lkr = 0
     let pending_lkr = 0
+    let overdue_lkr = 0
 
     const studentsWithPayment = activeStudents.map(s => {
       const studentPayments = payByStudent.get(s.id) ?? []
@@ -105,17 +115,25 @@ export async function GET(_req: NextRequest) {
         payment_status = 'paid'
         paid_count++
         collected_lkr += s.monthly_fee
-      } else if (studentPayments.some(p => p.status === 'overdue')) {
-        payment_status = 'overdue'
-        pending_count++
-        pending_lkr += s.monthly_fee
-      } else if (studentPayments.some(p => p.status === 'pending')) {
-        payment_status = 'pending'
-        pending_count++
-        pending_lkr += s.monthly_fee
       } else {
-        pending_count++
-        pending_lkr += s.monthly_fee
+        // Either a pending/overdue row exists, or there's no row yet this
+        // month (treated as pending for the overdue check below) — either
+        // way, live-compute against the tutor's CURRENT settings rather
+        // than trusting a stored status/due_date.
+        const nonTrial = studentPayments.find(p => !p.is_trial_payment)
+        const { isOverdue } = computeOverdueStatus(
+          monthlyDueDate, gracePeriodDays, currentMonth, nonTrial?.status ?? 'pending',
+        )
+
+        if (isOverdue) {
+          payment_status = 'overdue'
+          overdue_count++
+          overdue_lkr += s.monthly_fee
+        } else {
+          payment_status = 'pending'
+          pending_count++
+          pending_lkr += s.monthly_fee
+        }
       }
 
       return {
@@ -134,7 +152,9 @@ export async function GET(_req: NextRequest) {
       students: studentsWithPayment,
       paid_count,
       pending_count,
+      overdue_count,
       collected_lkr,
+      overdue_lkr,
       pending_lkr,
     }
   })

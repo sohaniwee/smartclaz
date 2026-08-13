@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import dynamic from 'next/dynamic'
 import type { EnrichedPayment } from '@/components/PaymentCard'
+import { computeOverdueStatus } from '@/lib/payment-status'
 
 // ── Lazy-loaded heavy components ──────────────────────────────────────────
 
@@ -27,6 +28,7 @@ interface TutorSettings {
   grace_period_days: number | null
   whatsapp_number: string | null
   name: string | null
+  auto_notify_overdue: boolean | null
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -36,18 +38,24 @@ function formatMonthLabel(key: string): string {
   return new Date(y, m - 1).toLocaleDateString('en-LK', { month: 'long', year: 'numeric' })
 }
 
+// Thin wrapper around the shared computeOverdueStatus() — this is the ONLY
+// place overdue math should ever be duplicated from; trial payments are
+// excluded here since the shared helper doesn't know about class_type.
 function computeOverdue(
   payment: Omit<EnrichedPayment, 'isOverdue' | 'daysPastDue'>,
-  graceEnd: Date,
+  monthlyDueDate: number | null,
+  gracePeriodDays: number | null,
 ): Pick<EnrichedPayment, 'isOverdue' | 'daysPastDue'> {
-  const now = new Date()
-  const pastGrace = now > graceEnd
-  const isPending = payment.status === 'pending'
-  const isOverdue = isPending && pastGrace && !payment.is_trial_payment
-  const daysPastDue = isOverdue
-    ? Math.max(0, Math.floor((now.getTime() - graceEnd.getTime()) / 86400000))
-    : 0
-  return { isOverdue, daysPastDue }
+  if (payment.is_trial_payment || !payment.month_year) {
+    return { isOverdue: false, daysPastDue: 0 }
+  }
+  const { isOverdue, daysOverdue } = computeOverdueStatus(
+    monthlyDueDate  ?? 28,
+    gracePeriodDays ?? 999,
+    payment.month_year,
+    payment.status,
+  )
+  return { isOverdue, daysPastDue: daysOverdue }
 }
 
 // ── Mark Paid Modal ────────────────────────────────────────────────────────
@@ -473,6 +481,7 @@ export default function PaymentsPage() {
   const searchParams = useSearchParams()
   const router = useRouter()
   const studentIdParam = searchParams.get('student')
+  const tabParam = searchParams.get('tab') as TabValue | null
 
   const [selectedMonth, setSelectedMonth] = useState(CURRENT_MONTH)
   const [payments,      setPayments]      = useState<EnrichedPayment[]>([])
@@ -540,7 +549,7 @@ export default function PaymentsPage() {
         .order('created_at', { ascending: false }),
       supabase
         .from('tutors')
-        .select('payment_instructions, monthly_due_date, grace_period_days, whatsapp_number, name')
+        .select('payment_instructions, monthly_due_date, grace_period_days, whatsapp_number, name, auto_notify_overdue')
         .eq('id', uid)
         .single(),
     ])
@@ -673,17 +682,10 @@ export default function PaymentsPage() {
     // Filter to the selected month
     const filtered = payments.filter(p => p.month_year === selectedMonth)
 
-    // Compute grace-end for this specific month
-    const [y, m] = selectedMonth.split('-').map(Number)
-    const dueDay         = tutor?.monthly_due_date  ?? null
-    const gracedays      = tutor?.grace_period_days ?? null
-    const effectiveDue   = dueDay    ?? 28
-    const effectiveGrace = gracedays ?? 999
-    const dueDate  = new Date(y, m - 1, effectiveDue)
-    const graceEnd = new Date(dueDate)
-    graceEnd.setDate(dueDate.getDate() + effectiveGrace)
-
-    return filtered.map(p => ({ ...p, ...computeOverdue(p, graceEnd) }))
+    return filtered.map(p => ({
+      ...p,
+      ...computeOverdue(p, tutor?.monthly_due_date ?? null, tutor?.grace_period_days ?? null),
+    }))
   }, [payments, selectedMonth, tutor])
 
   // ── Summary ───────────────────────────────────────────────────────────────
@@ -752,10 +754,12 @@ export default function PaymentsPage() {
     studentIdParam ? tabPayments.filter(p => p.student_id === studentIdParam) : tabPayments
   , [tabPayments, studentIdParam])
 
-  // Auto-switch to All tab when arriving with a student filter
+  // Auto-switch to All tab when arriving with a student filter, or to
+  // whichever tab was requested via ?tab= (e.g. the Dashboard's overdue link)
   useEffect(() => {
     if (studentIdParam) setTab('all')
-  }, [studentIdParam])
+    else if (tabParam && ['pending', 'overdue', 'paid', 'trial', 'all'].includes(tabParam)) setTab(tabParam)
+  }, [studentIdParam, tabParam])
 
   // ── Progress bar color ────────────────────────────────────────────────────
 
@@ -1008,6 +1012,19 @@ export default function PaymentsPage() {
           )}
         </div>
       </div>
+
+      {/* ── Manual reminder mode banner ───────────────────────────────────── */}
+      {tutor && tutor.auto_notify_overdue === false && (
+        <div className="flex items-center gap-2 px-4 py-2.5 rounded-[8px] bg-[#edf2ff] border border-[#dbe4ff] text-[0.8rem] text-[#3b5bdb]">
+          <span>💡</span>
+          <span>
+            Manual reminders mode — students won&apos;t be messaged automatically.
+            <a href="/settings#payments" className="ml-1.5 font-bold underline hover:text-[#2f49b8]">
+              Change in Settings →
+            </a>
+          </span>
+        </div>
+      )}
 
       {/* ── All time view ───────────────────────────────────────────────────── */}
       {viewMode === 'alltime' && (

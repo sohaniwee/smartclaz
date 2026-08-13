@@ -328,6 +328,7 @@ function SessionRow({
   onMarkAttendance,
   markIndividualAttendance,
   cycleSessionStatus,
+  showToast,
 }: {
   session: Session
   isNextUp: boolean
@@ -336,6 +337,7 @@ function SessionRow({
   onMarkAttendance: (s: Session) => void
   markIndividualAttendance: (sessionId: string, studentId: string, status: AttendanceStatus) => void
   cycleSessionStatus: (sessionId: string, next: SessionStatus) => void
+  showToast: (msg: string) => void
 }) {
   const future = !isPast(session.scheduled_at)
   const isCancelled = session.status === 'cancelled'
@@ -1220,6 +1222,7 @@ export default function SessionsPage() {
                     onMarkAttendance={setAttendanceSession}
                     markIndividualAttendance={markIndividualAttendance}
                     cycleSessionStatus={cycleSessionStatus}
+                    showToast={showToast}
                   />
                 ))}
               </div>

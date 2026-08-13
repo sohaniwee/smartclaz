@@ -20,6 +20,9 @@ import GettingStartedChecklist from '@/components/GettingStartedChecklist'
 import GettingStartedWizard from '@/components/GettingStarted'
 import type { SubjectEntry } from '@/lib/types/subjects'
 import CountUp from '@/components/CountUp'
+import { computeOverdueStatus } from '@/lib/payment-status'
+import ManualModeHint from '@/components/ManualModeHint'
+import OverduePaymentsCard, { type OverduePaymentItem } from '@/components/OverduePaymentsCard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,8 +67,8 @@ interface AtRiskStudent {
   studentId: string
   studentName: string
   amountLkr: number
-  dueDate: string
   daysOverdue: number
+  paymentId: string
 }
 
 interface MissedSession {
@@ -139,14 +142,7 @@ function fmtTime(t: string): string {
 }
 
 const DAYS_ORDER = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-
-function daysOverdue(dueDateStr: string): number {
-  const due = new Date(dueDateStr)
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  due.setHours(0, 0, 0, 0)
-  return Math.max(0, Math.floor((today.getTime() - due.getTime()) / 86400000))
-}
+const CURRENT_MONTH = new Date().toISOString().slice(0, 7)
 
 function getActivityIcon(action: string) {
   if (action === 'student_joined') return <Users size={13} className="text-[#3b5bdb]" />
@@ -454,6 +450,8 @@ export default function DashboardPage() {
   const [tutorSubjects,     setTutorSubjects]     = useState<SubjectEntry[]>([])
   const [tutorBatches,      setTutorBatches]      = useState<Batch[]>([])
   const [tutorMonthlyDueDate, setTutorMonthlyDueDate] = useState<number | null>(null)
+  const [tutorAutoNotifyOverdue, setTutorAutoNotifyOverdue] = useState(true)
+  const [showManualHint, setShowManualHint] = useState(false)
   const [tutorAvailability,   setTutorAvailability]   = useState<Array<{ day: string; enabled: boolean; start: string; end: string }>>([])
   const [sessionDuration,     setSessionDuration]     = useState<string>('')
 
@@ -493,7 +491,7 @@ export default function DashboardPage() {
     try {
       const { data } = await supabase
         .from('tutors')
-        .select('name, created_at, subjects, monthly_due_date, whatsapp_number, availability, notification_prefs, onboarding_complete, teaching_style')
+        .select('name, created_at, subjects, monthly_due_date, auto_notify_overdue, manual_mode_hint_seen, whatsapp_number, availability, notification_prefs, onboarding_complete, teaching_style')
         .eq('id', userId)
         .single()
       if (data) {
@@ -504,6 +502,9 @@ export default function DashboardPage() {
         // Populate modal data
         if (Array.isArray(subjects)) setTutorSubjects(subjects as SubjectEntry[])
         if (typeof data.monthly_due_date === 'number') setTutorMonthlyDueDate(data.monthly_due_date)
+        const autoNotify = (data.auto_notify_overdue as boolean | null) ?? true
+        setTutorAutoNotifyOverdue(autoNotify)
+        setShowManualHint(!autoNotify && !(data.manual_mode_hint_seen as boolean | null))
         if (Array.isArray(data.availability)) setTutorAvailability(data.availability as Array<{ day: string; enabled: boolean; start: string; end: string }>)
         const prefs = data.notification_prefs as Record<string, unknown> | null
         if (prefs?.session_duration) setSessionDuration(String(prefs.session_duration))
@@ -766,36 +767,49 @@ export default function DashboardPage() {
   const fetchAtRisk = useCallback(async (userId: string, supabase: ReturnType<typeof createClient>) => {
     setAtRiskLoading(true)
     try {
-      const today = new Date().toISOString().split('T')[0]
+      // Live-computed, not read from a stored due_date column — same
+      // computeOverdueStatus() helper used by Students, Payments and Batches,
+      // so this list can never disagree with those pages.
+      const [tutorRes, paymentsRes] = await Promise.all([
+        supabase.from('tutors').select('monthly_due_date, grace_period_days').eq('id', userId).single(),
+        supabase.from('payments')
+          .select('id, student_id, amount_lkr, month_year, status, is_trial_payment, students(name)')
+          .eq('tutor_id', userId)
+          .in('status', ['pending', 'overdue']),
+      ])
 
-      const { data: raw } = await supabase
-        .from('payments')
-        .select(`
-          student_id, amount_lkr, due_date,
-          students(name)
-        `)
-        .eq('tutor_id', userId)
-        .eq('status', 'pending')
-        .lt('due_date', today)
-        .order('due_date', { ascending: true })
-        .limit(5)
+      const monthlyDueDate  = (tutorRes.data?.monthly_due_date as number | null)  ?? 28
+      const gracePeriodDays = (tutorRes.data?.grace_period_days as number | null) ?? 3
 
       type RawAtRisk = {
+        id: string
         student_id: string
         amount_lkr: number
-        due_date: string
-        students: { name: string } | null
+        month_year: string | null
+        status: string
+        is_trial_payment: boolean | null
+        students: { name: string } | { name: string }[] | null
       }
 
-      const mapped: AtRiskStudent[] = ((raw ?? []) as unknown as RawAtRisk[]).map(p => ({
-        studentId: p.student_id,
-        studentName: p.students?.name ?? 'Unknown',
-        amountLkr: p.amount_lkr ?? 0,
-        dueDate: p.due_date,
-        daysOverdue: daysOverdue(p.due_date),
-      }))
+      const withStatus = ((paymentsRes.data ?? []) as unknown as RawAtRisk[])
+        .filter(p => !p.is_trial_payment)
+        .map(p => {
+          const student = Array.isArray(p.students) ? p.students[0] : p.students
+          const overdue = computeOverdueStatus(monthlyDueDate, gracePeriodDays, p.month_year ?? CURRENT_MONTH, p.status)
+          const student_: AtRiskStudent = {
+            paymentId:   p.id,
+            studentId:   p.student_id,
+            studentName: student?.name ?? 'Unknown',
+            amountLkr:   p.amount_lkr ?? 0,
+            daysOverdue: overdue.daysOverdue,
+          }
+          return { student_, isOverdue: overdue.isOverdue }
+        })
+        .filter(x => x.isOverdue)
+        .sort((a, b) => b.student_.daysOverdue - a.student_.daysOverdue)
+        .map(x => x.student_)
 
-      setAtRisk(mapped)
+      setAtRisk(withStatus)
     } catch { /* graceful fallback */ }
     setAtRiskLoading(false)
   }, [])
@@ -1251,6 +1265,13 @@ export default function DashboardPage() {
       {/* ── Main dashboard (hidden until first student) ──────────────────── */}
       {!isNewTutor && (
         <>
+          {showManualHint && (
+            <ManualModeHint
+              tutorId={tutorId ?? ''}
+              onDismiss={() => setShowManualHint(false)}
+            />
+          )}
+
           {/* 1. Dark blue action center — always visible, all five items always shown */}
           <div className="bg-[#0e1f3b] rounded-[18px] p-4 grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3">
 
@@ -1481,7 +1502,7 @@ export default function DashboardPage() {
           {/* 4. At Risk Students (left) + Recent Activity (right) */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
 
-            {/* At Risk Students */}
+            {/* At-Risk Students */}
             <div className="bg-white rounded-[18px] border border-[#dee2e6] shadow-[0_1px_3px_rgba(0,0,0,0.06)] overflow-hidden">
 
               {/* Header */}
@@ -1523,56 +1544,25 @@ export default function DashboardPage() {
               ) : (
                 <div className="px-4 pb-4 space-y-3">
 
-                  {/* ── Overdue payments group ── */}
-                  {atRisk.length > 0 && (
-                    <div className="rounded-[14px] border border-[#f1f3f5] overflow-hidden">
-                      {/* Group header */}
-                      <div className="flex items-center gap-2 px-4 py-2.5 bg-[#f8f9fa] border-b border-[#f1f3f5]">
-                        <div className="w-5 h-5 rounded-full bg-[#fff9db] border border-[#ffec99] flex items-center justify-center flex-shrink-0">
-                          <AlertCircle size={11} className="text-[#e67700]" />
-                        </div>
-                        <span className="text-[0.72rem] font-bold text-[#343a40]">Overdue payments</span>
-                        <span className="text-[0.68rem] text-[#adb5bd] font-medium">· {atRisk.length} student{atRisk.length !== 1 ? 's' : ''}</span>
-                      </div>
-                      {/* Rows */}
-                      {atRisk.map((student, i) => (
-                        <div key={`overdue-${i}`} className="flex items-center gap-3 px-4 py-3 border-b border-[#f8f9fa] last:border-0 hover:bg-[#fffbf5] transition-colors">
-                          {/* Avatar */}
-                          <div className="w-9 h-9 rounded-full bg-[#edf2ff] flex items-center justify-center flex-shrink-0 text-[#3b5bdb] text-[0.75rem] font-extrabold">
-                            {student.studentName.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
-                          </div>
-                          {/* Info */}
-                          <div className="flex-1 min-w-0">
-                            <p className="text-[0.82rem] font-semibold text-[#1a1a2e] truncate">
-                              {student.studentName}
-                              <span className="text-[#adb5bd] font-normal"> · {student.daysOverdue} days overdue</span>
-                            </p>
-                            <p className="text-[0.72rem] text-[#c92a2a] font-semibold mt-0.5">
-                              LKR {student.amountLkr.toLocaleString()}
-                              <span className="text-[#adb5bd] font-normal ml-1">· Due {new Date(student.dueDate).toLocaleDateString('en-LK', { day: 'numeric', month: 'short' })}</span>
-                            </p>
-                          </div>
-                          {/* Actions */}
-                          <div className="flex items-center gap-1.5 flex-shrink-0">
-                            <Link
-                              href="/chats"
-                              className="px-3 py-1.5 rounded-full text-[0.7rem] font-semibold border border-[#dee2e6] text-[#343a40] hover:border-[#3b5bdb] hover:text-[#3b5bdb] transition-colors bg-white"
-                            >
-                              Remind
-                            </Link>
-                            <Link
-                              href={`/payments?student=${student.studentId}`}
-                              className="px-3 py-1.5 rounded-full text-[0.7rem] font-semibold bg-[#3b5bdb] text-white hover:bg-[#2f49b8] transition-colors shadow-[0_2px_6px_rgba(59,91,219,0.3)]"
-                            >
-                              Verify
-                            </Link>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <OverduePaymentsCard
+                    payments={atRisk.map((s): OverduePaymentItem => ({
+                      paymentId:   s.paymentId,
+                      studentId:   s.studentId,
+                      studentName: s.studentName,
+                      amountLkr:   s.amountLkr,
+                      daysOverdue: s.daysOverdue,
+                    }))}
+                    totalCount={atRisk.length}
+                    autoNotifyMode={tutorAutoNotifyOverdue}
+                    onChanged={() => {
+                      if (!tutorId) return
+                      const supabase = createClient()
+                      fetchAtRisk(tutorId, supabase).catch(() => {})
+                      fetchActionCounts(tutorId, supabase).catch(() => {})
+                      fetchStats(tutorId, supabase, sessions.length).catch(() => {})
+                    }}
+                  />
 
-                  {/* ── Missed sessions group ── */}
                   {missedSessions.length > 0 && (
                     <div className="rounded-[14px] border border-[#f1f3f5] overflow-hidden">
                       {/* Group header */}

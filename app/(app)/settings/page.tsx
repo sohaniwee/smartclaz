@@ -145,6 +145,8 @@ type TutorRow = {
   grace_period_days: number | null
   payment_instructions: string | null
   notification_prefs: { events?: NotifPrefs } | null
+  auto_notify_overdue: boolean | null
+  manual_mode_hint_seen: boolean | null
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1555,6 +1557,7 @@ export default function SettingsPage() {
   const [paymentInstructions, setPaymentInstructions] = useState('')
   const [monthlyDueDate, setMonthlyDueDate] = useState<'5' | '10' | '15' | '20' | '25' | '28'>('5')
   const [gracePeriod, setGracePeriod] = useState<'3' | '5' | '7'>('5')
+  const [autoNotify, setAutoNotify] = useState(true)
   const [paymentsLoading, setPaymentsLoading] = useState(false)
   const [paymentsSaved, setPaymentsSaved] = useState(false)
   const [paymentsError, setPaymentsError] = useState('')
@@ -1604,7 +1607,7 @@ export default function SettingsPage() {
 
       const { data } = await supabase
         .from('tutors')
-        .select('id, name, phone, email, whatsapp_number, subjects, reschedule_policy, noshow_policy, monthly_due_date, grace_period_days, payment_instructions, notification_prefs')
+        .select('id, name, phone, email, whatsapp_number, subjects, reschedule_policy, noshow_policy, monthly_due_date, grace_period_days, payment_instructions, notification_prefs, auto_notify_overdue, manual_mode_hint_seen')
         .eq('id', user.id)
         .single()
 
@@ -1675,6 +1678,7 @@ export default function SettingsPage() {
         setMonthlyDueDate(validDates.includes(asStr) ? asStr : '5')
       }
       setGracePeriod((String(row.grace_period_days ?? 5) as '3' | '5' | '7'))
+      setAutoNotify(row.auto_notify_overdue ?? true)
 
       // Preferences — WhatsApp number
       if (row.whatsapp_number) {
@@ -2092,14 +2096,29 @@ export default function SettingsPage() {
   async function handleSavePayments() {
     setPaymentsError('')
     setPaymentsLoading(true)
+
+    // Switching INTO manual mode resets the one-time Dashboard hint so it
+    // shows again — the tutor is re-entering a mode they may need the
+    // explainer for, even if they saw it during a previous manual period.
+    const switchingToManual = (tutor?.auto_notify_overdue ?? true) === true && autoNotify === false
+
     const ok = await updateTutor({
       payment_instructions: paymentInstructions.trim(),
       monthly_due_date: Number(monthlyDueDate),
       grace_period_days: Number(gracePeriod),
+      auto_notify_overdue: autoNotify,
+      ...(switchingToManual && { manual_mode_hint_seen: false }),
     })
     setPaymentsLoading(false)
     if (!ok) { setPaymentsError('Could not save. Please try again.'); return }
-    setTutor(prev => prev ? { ...prev, payment_instructions: paymentInstructions.trim(), monthly_due_date: Number(monthlyDueDate), grace_period_days: Number(gracePeriod) } : prev)
+    setTutor(prev => prev ? {
+      ...prev,
+      payment_instructions: paymentInstructions.trim(),
+      monthly_due_date: Number(monthlyDueDate),
+      grace_period_days: Number(gracePeriod),
+      auto_notify_overdue: autoNotify,
+      ...(switchingToManual && { manual_mode_hint_seen: false }),
+    } : prev)
     setPaymentsEditing(false)
     flashSaved(setPaymentsSaved)
   }
@@ -2112,6 +2131,7 @@ export default function SettingsPage() {
       setMonthlyDueDate(validDates.includes(asStr) ? asStr : '5')
     }
     setGracePeriod(String(tutor?.grace_period_days ?? 5) as '3' | '5' | '7')
+    setAutoNotify(tutor?.auto_notify_overdue ?? true)
     setPaymentsError('')
     setPaymentsEditing(false)
   }
@@ -2670,6 +2690,10 @@ export default function SettingsPage() {
                       <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">Grace period</dt>
                       <dd className="text-sm font-medium text-[#1a1a2e]">{gracePeriod} days</dd>
                     </div>
+                    <div>
+                      <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">Payment reminders</dt>
+                      <dd className="text-sm font-medium text-[#1a1a2e]">{autoNotify ? 'Sent automatically' : 'Manual — notify me only'}</dd>
+                    </div>
                   </div>
                   {paymentsSaved && <SavedToast visible />}
                 </dl>
@@ -2753,6 +2777,59 @@ export default function SettingsPage() {
                           <p className="text-xs text-[#6c757d] mt-0.5">{opt.sublabel}</p>
                         </button>
                       ))}
+                    </div>
+                  </div>
+
+                  {/* Payment reminders — auto-notify consent */}
+                  <div>
+                    <div className="flex items-center gap-2 mb-2 pb-1.5 border-b border-[#f1f3f5]">
+                      <div className="w-6 h-6 rounded-[6px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0">
+                        <Bell size={12} className="text-white" />
+                      </div>
+                      <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">Payment Reminders</h3>
+                    </div>
+                    <p className="text-[#6c757d] text-xs mb-3">
+                      This applies to all reminder stages — 3-day-before, due date, and overdue.
+                    </p>
+                    <div className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setAutoNotify(true)}
+                        className={`w-full text-left rounded-[12px] border px-4 py-3 transition-all duration-150 ${
+                          autoNotify
+                            ? 'border-[#3b5bdb] bg-[#edf2ff] shadow-[0_0_0_1px_#3b5bdb]'
+                            : 'border-[#dee2e6] bg-white hover:border-[#3b5bdb] hover:bg-[#f8f9ff]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-all ${autoNotify ? 'border-[#3b5bdb]' : 'border-[#ced4da]'}`}>
+                            {autoNotify && <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />}
+                          </div>
+                          <div>
+                            <p className={`text-sm font-semibold leading-none mb-0.5 ${autoNotify ? 'text-[#3b5bdb]' : 'text-[#1a1a2e]'}`}>Yes, send automatically</p>
+                            <p className="text-xs text-[#6c757d] mt-0.5">We&apos;ll message students for you at 3 days before, on the due date, and if payment is overdue.</p>
+                          </div>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAutoNotify(false)}
+                        className={`w-full text-left rounded-[12px] border px-4 py-3 transition-all duration-150 ${
+                          !autoNotify
+                            ? 'border-[#3b5bdb] bg-[#edf2ff] shadow-[0_0_0_1px_#3b5bdb]'
+                            : 'border-[#dee2e6] bg-white hover:border-[#3b5bdb] hover:bg-[#f8f9ff]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-all ${!autoNotify ? 'border-[#3b5bdb]' : 'border-[#ced4da]'}`}>
+                            {!autoNotify && <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />}
+                          </div>
+                          <div>
+                            <p className={`text-sm font-semibold leading-none mb-0.5 ${!autoNotify ? 'text-[#3b5bdb]' : 'text-[#1a1a2e]'}`}>No, just notify me</p>
+                            <p className="text-xs text-[#6c757d] mt-0.5">I&apos;ll review and decide when to send each reminder myself.</p>
+                          </div>
+                        </div>
+                      </button>
                     </div>
                   </div>
 

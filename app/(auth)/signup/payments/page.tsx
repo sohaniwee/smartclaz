@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { FileText, CalendarDays, ShieldAlert } from 'lucide-react'
+import { FileText, CalendarDays, ShieldAlert, Bell } from 'lucide-react'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -104,6 +104,8 @@ export default function PaymentsSetupPage() {
   const [paymentInstructions, setPaymentInstructions] = useState('')
   const [dueDate, setDueDate] = useState('5')
   const [gracePeriod, setGracePeriod] = useState<GracePeriod>('5')
+  // Default Yes — safer default, less manual work for most tutors
+  const [autoNotify, setAutoNotify] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [fieldError, setFieldError] = useState('')
@@ -121,7 +123,7 @@ export default function PaymentsSetupPage() {
 
       const { data } = await supabase
         .from('tutors')
-        .select('payment_instructions, monthly_due_date, grace_period_days')
+        .select('payment_instructions, monthly_due_date, grace_period_days, auto_notify_overdue')
         .eq('id', user.id)
         .single()
 
@@ -129,6 +131,7 @@ export default function PaymentsSetupPage() {
         if (data.payment_instructions) setPaymentInstructions(data.payment_instructions)
         if (data.monthly_due_date) setDueDate(String(data.monthly_due_date))
         if (data.grace_period_days) setGracePeriod(String(data.grace_period_days) as GracePeriod)
+        if (typeof data.auto_notify_overdue === 'boolean') setAutoNotify(data.auto_notify_overdue)
       }
 
       setAuthChecked(true)
@@ -164,6 +167,7 @@ export default function PaymentsSetupPage() {
         payment_instructions: paymentInstructions.trim(),
         monthly_due_date: parseInt(dueDate),
         grace_period_days: parseInt(gracePeriod),
+        auto_notify_overdue: autoNotify,
       })
       .eq('id', userId)
 
@@ -343,6 +347,77 @@ export default function PaymentsSetupPage() {
                   </button>
                 )
               })}
+            </div>
+          </div>
+
+          {/* ── Section 4: Payment Reminders (auto-notify consent) ── */}
+          <div className="border border-[#dee2e6] rounded-[18px] p-5 space-y-3 bg-white shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-[8px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0 mt-0.5">
+                <Bell size={15} className="text-white" />
+              </div>
+              <div>
+                <h2 className="text-[0.84rem] font-bold text-[#1a1a2e] tracking-[-0.01em]">
+                  Payment Reminders
+                </h2>
+                <p className="text-[#6c757d] text-xs mt-0.5 leading-relaxed">
+                  Automatically remind students when payment is due or overdue?
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setAutoNotify(true)}
+                className={`w-full text-left rounded-[12px] border px-4 py-3 transition-all duration-150 ${
+                  autoNotify
+                    ? 'border-[#3b5bdb] bg-[#edf2ff] shadow-[0_0_0_1px_#3b5bdb]'
+                    : 'border-[#dee2e6] bg-white hover:border-[#3b5bdb] hover:bg-[#f8f9ff]'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-all ${
+                    autoNotify ? 'border-[#3b5bdb]' : 'border-[#ced4da]'
+                  }`}>
+                    {autoNotify && <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />}
+                  </div>
+                  <div>
+                    <p className={`text-sm font-semibold leading-none mb-0.5 ${autoNotify ? 'text-[#3b5bdb]' : 'text-[#1a1a2e]'}`}>
+                      Yes, send automatically (Recommended)
+                    </p>
+                    <p className="text-[#6c757d] text-xs">
+                      We&apos;ll message students for you at 3 days before, on the due date, and if payment is overdue.
+                    </p>
+                  </div>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAutoNotify(false)}
+                className={`w-full text-left rounded-[12px] border px-4 py-3 transition-all duration-150 ${
+                  !autoNotify
+                    ? 'border-[#3b5bdb] bg-[#edf2ff] shadow-[0_0_0_1px_#3b5bdb]'
+                    : 'border-[#dee2e6] bg-white hover:border-[#3b5bdb] hover:bg-[#f8f9ff]'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-all ${
+                    !autoNotify ? 'border-[#3b5bdb]' : 'border-[#ced4da]'
+                  }`}>
+                    {!autoNotify && <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />}
+                  </div>
+                  <div>
+                    <p className={`text-sm font-semibold leading-none mb-0.5 ${!autoNotify ? 'text-[#3b5bdb]' : 'text-[#1a1a2e]'}`}>
+                      No, just notify me
+                    </p>
+                    <p className="text-[#6c757d] text-xs">
+                      I&apos;ll review and decide when to send each reminder myself.
+                    </p>
+                  </div>
+                </div>
+              </button>
             </div>
           </div>
 

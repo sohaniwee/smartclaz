@@ -19,10 +19,12 @@ import {
   sendReminder1hr,
   sendTutorWhatsApp,
   sendPaymentReminder,
+  sendOverduePaymentReminder,
   sendZoomLink,
 } from '@/lib/twilio'
 import { createBatchZoomMeeting } from '@/lib/zoom'
 import { generateBatchSessions } from '@/lib/sessions/generate-batch-sessions'
+import { computeOverdueStatus } from '@/lib/payment-status'
 
 // ── Service role Supabase client ─────────────────────────────────────────────
 function getServiceSupabase() {
@@ -88,13 +90,17 @@ export async function GET(req: NextRequest) {
 
   const supabase = getServiceSupabase()
   const results = {
-    reminder24h:        0,
-    reminder1h:         0,
-    tutorNotified:      0,
-    paymentReminders:   0,
-    studentsBlocked:    0,
-    batchLinksRefreshed: 0,
-    errors:             [] as string[],
+    reminder24h:            0,
+    reminder1h:             0,
+    tutorNotified:          0,
+    paymentReminders3Day:   0,
+    paymentRemindersDue:    0,
+    paymentsNewlyOverdue:   0,
+    overdueRemindersSent:   0,
+    tutorSummariesSent:     0,
+    studentsBlocked:        0, // always 0 — blocking is manual-only, cron never sets this
+    batchLinksRefreshed:    0,
+    errors:                 [] as string[],
   }
 
   // ── 0. Expire stale contact-change requests (email/phone change flows) ────
@@ -253,113 +259,223 @@ export async function GET(req: NextRequest) {
     results.errors.push(`30min batch error: ${String(err)}`)
   }
 
-  // ── 4. Payment reminders (3 days before due) ──────────────────────────────
-  // Payments due within 3 days, still pending, reminder not yet sent.
+  // ── 4+5. Payment reminders — 3-day / due-date / overdue stages ────────────
+  // ✅ CURRENT: "Is this payment overdue" is NEVER read from a stored/frozen
+  //    due_date column. It's computed live, every run, from computeOverdueStatus()
+  //    using the tutor's CURRENT monthly_due_date + grace_period_days settings —
+  //    the same function Dashboard, Students, Payments and Batches all use, so
+  //    they can never disagree with each other.
+  // 📝 NOTE: Blocking a student is ALWAYS a manual tutor action (via the
+  //    [Block student] button on Dashboard/Payments) — this cron NEVER sets
+  //    students.status='blocked', regardless of the tutor's notify preference.
+  // 📝 NOTE: auto_notify_overdue=true → message students directly at all 3
+  //    stages. auto_notify_overdue=false → only the tutor is notified, via a
+  //    single batched WhatsApp summary per run, and the tutor sends reminders
+  //    manually from the Payments/Dashboard [Send reminder] buttons.
   try {
-    const now         = new Date()
-    const threeDaysOut = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000)
-
-    const { data: pendingPayments, error } = await supabase
-      .from('payments')
-      .select('id, amount_lkr, due_date, students(id, name, whatsapp, parent_whatsapp), tutors(id, name, whatsapp_number, phone, payment_instructions)')
-      .lte('due_date', threeDaysOut.toISOString().split('T')[0])
-      .gte('due_date', now.toISOString().split('T')[0])
-      .eq('status', 'pending')
-      .is('reminder_3day_sent', false)
-
-    if (error) throw error
-
-    for (const payment of pendingPayments ?? []) {
-      try {
-        const student = Array.isArray(payment.students) ? payment.students[0] : payment.students
-        const tutor   = Array.isArray(payment.tutors)   ? payment.tutors[0]   : payment.tutors
-        if (!student) continue
-
-        // Send to student directly, or parent if student has no number
-        const recipientPhone = student.whatsapp ?? student.parent_whatsapp
-        if (!recipientPhone) continue
-
-        await sendPaymentReminder(
-          recipientPhone,
-          tutor?.whatsapp_number ?? tutor?.phone ?? '',
-          student.name,
-          payment.amount_lkr,
-          formatDueDate(payment.due_date),
-          tutor?.payment_instructions ?? 'Contact tutor for payment details.',
-          tutor?.id,
-        )
-
-        await supabase
-          .from('payments')
-          .update({ reminder_3day_sent: true })
-          .eq('id', payment.id)
-
-        results.paymentReminders++
-      } catch (err) {
-        results.errors.push(`payment reminder ${payment.id}: ${String(err)}`)
-      }
+    type TutorRow = {
+      id: string
+      monthly_due_date: number | null
+      grace_period_days: number | null
+      whatsapp_number: string | null
+      phone: string | null
+      payment_instructions: string | null
+      auto_notify_overdue: boolean | null
     }
-  } catch (err) {
-    results.errors.push(`payment reminder batch error: ${String(err)}`)
-  }
 
-  // ── 5. Block overdue students ─────────────────────────────────────────────
-  // Payments past due_date + grace_period_days → set student.status='blocked'.
-  try {
-    const now = new Date()
+    const { data: tutors, error: tutorsErr } = await supabase
+      .from('tutors')
+      .select('id, monthly_due_date, grace_period_days, whatsapp_number, phone, payment_instructions, auto_notify_overdue')
 
-    // Fetch overdue payments with tutor grace period
-    const { data: overduePayments, error } = await supabase
-      .from('payments')
-      .select('id, due_date, student_id, students(id, status, name, whatsapp), tutors(id, name, whatsapp_number, phone, grace_period_days)')
-      .eq('status', 'pending')
+    if (tutorsErr) throw tutorsErr
 
-    if (error) throw error
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
 
-    for (const payment of overduePayments ?? []) {
+    for (const tutor of (tutors ?? []) as TutorRow[]) {
       try {
-        const tutor   = Array.isArray(payment.tutors)   ? payment.tutors[0]   : payment.tutors
-        const student = Array.isArray(payment.students) ? payment.students[0] : payment.students
-        if (!student || student.status === 'blocked') continue
+        const monthlyDueDate  = tutor.monthly_due_date  ?? 28
+        const gracePeriodDays = tutor.grace_period_days ?? 3
+        const tutorPhone      = tutor.whatsapp_number ?? tutor.phone ?? ''
+        const autoNotify      = tutor.auto_notify_overdue ?? true
 
-        const graceDays = tutor?.grace_period_days ?? 3
-        const dueDate   = new Date(payment.due_date)
-        const blockDate = new Date(dueDate.getTime() + graceDays * 24 * 60 * 60 * 1000)
+        type StudentRel = { id: string; name: string; whatsapp: string; parent_whatsapp: string | null }
 
-        if (now > blockDate) {
-          // Block student
-          await supabase
-            .from('students')
-            .update({ status: 'blocked' })
-            .eq('id', payment.student_id)
+        type RawPending = {
+          id: string
+          amount_lkr: number
+          month_year: string | null
+          status: string
+          is_trial_payment: boolean | null
+          reminder_3day_sent: boolean | null
+          reminder_due_sent: boolean | null
+          reminder_overdue_sent: boolean | null
+          tutor_notified_3day: boolean | null
+          tutor_notified_due: boolean | null
+          students: StudentRel | StudentRel[] | null
+        }
 
-          // Update payment status
-          await supabase
-            .from('payments')
-            .update({ status: 'overdue' })
-            .eq('id', payment.id)
+        const { data: pendingPayments, error: paymentsErr } = await supabase
+          .from('payments')
+          .select('id, amount_lkr, month_year, status, is_trial_payment, reminder_3day_sent, reminder_due_sent, reminder_overdue_sent, tutor_notified_3day, tutor_notified_due, students(id, name, whatsapp, parent_whatsapp)')
+          .eq('tutor_id', tutor.id)
+          .in('status', ['pending', 'overdue'])
 
-          // Notify tutor
-          if (tutor?.whatsapp_number ?? tutor?.phone) {
-            await sendTutorWhatsApp(
-              tutor.whatsapp_number ?? tutor.phone,
-              'Student blocked — overdue payment',
-              `*${student.name}* has been automatically blocked.\n` +
-              `Fee was due on ${formatDueDate(payment.due_date)} (grace period: ${graceDays} days).\n` +
-              `No Zoom links will be sent until payment is verified.`,
-              `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://smartclaz.com'}/payments`,
-              tutor.id,
-            )
+        if (paymentsErr) throw paymentsErr
+
+        const threeDayReminders: RawPending[] = []
+        const dueDateReminders:  RawPending[] = []
+        const newlyOverdue:      RawPending[] = []
+
+        for (const raw of (pendingPayments ?? []) as unknown as RawPending[]) {
+          const student = Array.isArray(raw.students) ? raw.students[0] : raw.students
+          if (!student || raw.is_trial_payment || !raw.month_year) continue
+
+          const { isOverdue, daysOverdue, dueDate } = computeOverdueStatus(
+            monthlyDueDate, gracePeriodDays, raw.month_year, raw.status,
+          )
+
+          const recipientPhone = student.whatsapp ?? student.parent_whatsapp
+          const threeDaysBefore = new Date(dueDate)
+          threeDaysBefore.setDate(dueDate.getDate() - 3)
+
+          // ── 3-day-before stage ──
+          if (
+            today.toDateString() === threeDaysBefore.toDateString() &&
+            !raw.reminder_3day_sent &&
+            !raw.tutor_notified_3day
+          ) {
+            try {
+              if (autoNotify && recipientPhone) {
+                await sendPaymentReminder(
+                  recipientPhone, tutorPhone, student.name, raw.amount_lkr,
+                  formatDueDate(dueDate.toISOString().split('T')[0]),
+                  tutor.payment_instructions ?? 'Contact tutor for payment details.',
+                  tutor.id,
+                )
+                results.paymentReminders3Day++
+              } else if (!autoNotify) {
+                threeDayReminders.push(raw)
+              }
+              await supabase.from('payments')
+                .update(autoNotify ? { reminder_3day_sent: true } : { tutor_notified_3day: true })
+                .eq('id', raw.id)
+            } catch (err) {
+              results.errors.push(`3day reminder ${raw.id}: ${String(err)}`)
+            }
           }
 
-          results.studentsBlocked++
+          // ── due-date stage ──
+          if (
+            today.toDateString() === dueDate.toDateString() &&
+            !raw.reminder_due_sent &&
+            !raw.tutor_notified_due
+          ) {
+            try {
+              if (autoNotify && recipientPhone) {
+                await sendPaymentReminder(
+                  recipientPhone, tutorPhone, student.name, raw.amount_lkr,
+                  formatDueDate(dueDate.toISOString().split('T')[0]),
+                  tutor.payment_instructions ?? 'Contact tutor for payment details.',
+                  tutor.id,
+                )
+                results.paymentRemindersDue++
+              } else if (!autoNotify) {
+                dueDateReminders.push(raw)
+              }
+              await supabase.from('payments')
+                .update(autoNotify ? { reminder_due_sent: true } : { tutor_notified_due: true })
+                .eq('id', raw.id)
+            } catch (err) {
+              results.errors.push(`due-date reminder ${raw.id}: ${String(err)}`)
+            }
+          }
+
+          // ── overdue stage ──
+          // Always label the payment 'overdue' once grace has elapsed —
+          // internal status flag only, never blocks anyone.
+          if (isOverdue && raw.status !== 'overdue') {
+            try {
+              await supabase.from('payments')
+                .update({ status: 'overdue' })
+                .eq('id', raw.id)
+
+              if (autoNotify && recipientPhone) {
+                await sendOverduePaymentReminder(
+                  recipientPhone, tutorPhone, student.name, raw.amount_lkr, daysOverdue,
+                  tutor.payment_instructions ?? 'Contact tutor for payment details.',
+                  tutor.id,
+                )
+                results.overdueRemindersSent++
+              }
+
+              newlyOverdue.push(raw)
+              results.paymentsNewlyOverdue++
+
+              // ⚠️ NEVER runs, on purpose:
+              // await supabase.from('students').update({ status: 'blocked' })
+              // Blocking is ALWAYS a manual tutor click via the
+              // Payments/Dashboard [Block student] button — never automatic,
+              // regardless of this tutor's notify preference.
+            } catch (err) {
+              results.errors.push(`overdue label ${raw.id}: ${String(err)}`)
+            }
+          }
+        }
+
+        // ── Batched tutor notification ──
+        const parts: string[] = []
+
+        if (!autoNotify) {
+          if (threeDayReminders.length > 0) {
+            parts.push(`${threeDayReminders.length} payment${threeDayReminders.length > 1 ? 's' : ''} due in 3 days`)
+          }
+          if (dueDateReminders.length > 0) {
+            parts.push(`${dueDateReminders.length} payment${dueDateReminders.length > 1 ? 's' : ''} due today`)
+          }
+        }
+
+        if (newlyOverdue.length > 0) {
+          const names = newlyOverdue
+            .map(p => (Array.isArray(p.students) ? p.students[0] : p.students)?.name)
+            .filter(Boolean)
+            .slice(0, 3)
+            .join(', ')
+          const extra = newlyOverdue.length > 3 ? ` and ${newlyOverdue.length - 3} more` : ''
+
+          parts.push(
+            autoNotify
+              ? `${newlyOverdue.length} student${newlyOverdue.length > 1 ? 's' : ''} now overdue — reminder sent automatically (${names}${extra})`
+              : `${newlyOverdue.length} student${newlyOverdue.length > 1 ? 's are' : ' is'} now overdue: ${names}${extra}`,
+          )
+        }
+
+        if (parts.length > 0 && tutorPhone) {
+          await sendTutorWhatsApp(
+            tutorPhone,
+            'Payment update',
+            parts.map(p => `• ${p}`).join('\n') +
+              (!autoNotify ? `\n\nReview and send reminders:\n${process.env.NEXT_PUBLIC_APP_URL ?? 'https://smartclaz.com'}/payments` : ''),
+            undefined,
+            tutor.id,
+          )
+          results.tutorSummariesSent++
+
+          await supabase.from('notifications').insert({
+            tutor_id:   tutor.id,
+            type:       'payment_reminder_summary',
+            title:      'Payment reminders update',
+            body:       parts.join(' · '),
+            action_url: '/payments',
+            read:       false,
+          })
         }
       } catch (err) {
-        results.errors.push(`block student payment ${payment.id}: ${String(err)}`)
+        results.errors.push(`payment reminders for tutor ${tutor.id}: ${String(err)}`)
       }
     }
   } catch (err) {
-    results.errors.push(`block overdue batch error: ${String(err)}`)
+    results.errors.push(`payment reminders batch error: ${String(err)}`)
   }
 
   // ─────────────────────────────────────────────────────────
@@ -523,15 +639,19 @@ export async function GET(req: NextRequest) {
   console.log('[reminders] Run complete:', results)
 
   return NextResponse.json({
-    success:             true,
-    reminder24h:         results.reminder24h,
-    reminder1h:          results.reminder1h,
-    tutorNotified:       results.tutorNotified,
-    paymentReminders:    results.paymentReminders,
-    studentsBlocked:     results.studentsBlocked,
-    batchLinksRefreshed: results.batchLinksRefreshed,
-    errors:              results.errors,
-    timestamp:           new Date().toISOString(),
+    success:               true,
+    reminder24h:           results.reminder24h,
+    reminder1h:            results.reminder1h,
+    tutorNotified:         results.tutorNotified,
+    paymentReminders3Day:  results.paymentReminders3Day,
+    paymentRemindersDue:   results.paymentRemindersDue,
+    paymentsNewlyOverdue:  results.paymentsNewlyOverdue,
+    overdueRemindersSent:  results.overdueRemindersSent,
+    tutorSummariesSent:    results.tutorSummariesSent,
+    studentsBlocked:       results.studentsBlocked, // always 0 — blocking is manual-only
+    batchLinksRefreshed:   results.batchLinksRefreshed,
+    errors:                results.errors,
+    timestamp:             new Date().toISOString(),
   })
 }
 
