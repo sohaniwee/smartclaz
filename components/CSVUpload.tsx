@@ -436,7 +436,7 @@ function validateRows(
     }
 
     // ── 10b. Cross-check individual/trial date+time against this subject+grade's
-    // configured individual_slots (set per-grade in signup/subjects — day + time,
+    // configured individual_slots (set per-grade in signup/classes — day + time,
     // shared duration via individual_duration_mins). Skipped for group (schedule
     // comes from the batch) and when this grade has no individual slots configured
     // at all — nothing to validate against.

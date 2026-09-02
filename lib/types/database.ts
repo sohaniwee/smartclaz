@@ -42,8 +42,12 @@ export interface TutorSubject {
 
 /**
  * availability JSONB structure stored in tutors.availability — a list of
- * discrete bookable slots for new individual students (set in
- * app/(auth)/signup/availability/page.tsx), not day-long open ranges:
+ * discrete bookable slots for new individual students, not day-long open
+ * ranges. The page that used to set this (signup/availability) was removed
+ * as unreachable dead code — the live signup flow tracks per-subject
+ * individual slots via tutors.subjects[].grades[].individual_slots instead
+ * (see SubjectGrade above), so this column is not currently populated by
+ * any live UI:
  *
  * [{ day: "Monday", time: "15:00", duration_mins: 60, is_free: true }]
  */

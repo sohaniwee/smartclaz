@@ -7,6 +7,27 @@ The operating system for Sri Lankan online tutors. Automates student onboarding,
 
 ---
 
+## ⚠️ Live Signup Flow (confirmed from code, not from the docs below)
+This file's "App Pages" section below describes an earlier planned architecture
+(`src/app/signup/subjects` → `settings`) that no longer matches the codebase.
+The actual paths are `app/(auth)/signup/*`, and the **only live, middleware-enforced
+signup flow** — confirmed via `proxy.ts`'s `stepOrder` array and every page's actual
+"Continue" button destination — is:
+
+```
+/signup → /signup/classes → /signup/payments → /signup/preferences → /dashboard
+(profile)  (subjects/fees)   (payment setup)     (WhatsApp/policies,
+                                                   sets status='active')
+```
+
+An earlier, unreachable parallel flow (`signup/subjects`, `signup/groups`,
+`signup/availability`, `signup/settings`) existed in the codebase but was never
+linked from Step 1 and was not checked by `proxy.ts` — it has been deleted.
+Do not recreate pages at those paths without first checking whether they'd
+actually be reachable from `/signup`.
+
+---
+
 ## Tech Stack
 - **Framework:** Next.js 14 + TypeScript
 - **UI:** Tailwind CSS + shadcn/ui components

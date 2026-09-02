@@ -1,6 +1,6 @@
 /**
  * Welcome email API route.
- * ✅ CURRENT: Called by signup/settings/page.tsx after Step 3 completes.
+ * ✅ CURRENT: Called by signup/preferences/page.tsx after Step 4 completes.
  *    Uses lib/resend.ts (server-only) to send the welcome email.
  * 📝 NOTE: This route exists so RESEND_API_KEY stays server-side only.
  *    Client components cannot call lib/resend.ts directly.

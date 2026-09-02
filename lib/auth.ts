@@ -12,7 +12,7 @@
  *      Add phone OTP after email OTP verified
  *
  * □ 3. Wire WhatsApp Business API (Twilio)
- *      File: app/(auth)/signup/settings/page.tsx
+ *      File: app/(auth)/signup/preferences/page.tsx
  *      Connect tutor WhatsApp number to bot
  *
  * □ 4. Replace Resend test domain with real domain
@@ -48,7 +48,7 @@
  *        - Email renders correctly on mobile
  *        File: lib/resend.ts → sendWelcomeEmail()
  *        Route: app/api/auth/welcome-email/route.ts
- *        Triggered by: app/(auth)/signup/settings/page.tsx on step 3 complete
+ *        Triggered by: app/(auth)/signup/preferences/page.tsx on step 4 complete
  *        ⚠️  onboarding@resend.dev only delivers to the Resend account owner's
  *            email — verify domain before testing with real tutor emails
  *
@@ -538,108 +538,6 @@ export async function verifyEmailOTP(email: string, token: string): Promise<Veri
     return { success: true, userId: data.user.id }
   } catch {
     return { success: false, error: 'Network error. Please check your connection and try again.' }
-  }
-}
-
-// ── getCurrentTutor ───────────────────────────────────────────────────────────
-
-export type TutorRow = {
-  id: string
-  name: string | null
-  email: string | null
-  phone: string | null
-  status: string | null
-  subjects: unknown | null
-  availability: unknown | null
-  reschedule_policy: string | null
-  noshow_policy: string | null
-  monthly_due_date: number | null
-  grace_period_days: number | null
-  notification_prefs: unknown | null
-  whatsapp_number: string | null
-  payment_instructions: string | null
-}
-
-/**
- * Fetch the tutor row for the currently logged-in user.
- * Returns null if not authenticated or row not found.
- */
-export async function getCurrentTutor(): Promise<TutorRow | null> {
-  try {
-    const supabase = getSupabase()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return null
-
-    const { data, error } = await supabase
-      .from('tutors')
-      .select('*')
-      .eq('id', user.id)
-      .single()
-
-    if (error || !data) return null
-    return data as TutorRow
-  } catch {
-    return null
-  }
-}
-
-// ── isSignupComplete ──────────────────────────────────────────────────────────
-
-/**
- * Returns which signup step the tutor needs to complete.
- * Used by middleware and auth guards for smart redirects.
- *
- * Returns:
- *   'subjects'  — Step 1 done, needs Step 2
- *   'settings'  — Step 2 done, needs Step 3
- *   'complete'  — All 3 steps done
- *   null        — Not authenticated
- */
-export type SignupStatus = 'subjects' | 'settings' | 'complete' | null
-
-export async function isSignupComplete(): Promise<SignupStatus> {
-  const tutor = await getCurrentTutor()
-  if (!tutor) return null
-
-  // Check subjects (Step 2)
-  const hasSubjects = Array.isArray(tutor.subjects) && (tutor.subjects as unknown[]).length > 0
-  if (!hasSubjects) return 'subjects'
-
-  // Check settings (Step 3)
-  const hasSettings = !!(tutor.availability || tutor.reschedule_policy)
-  if (!hasSettings) return 'settings'
-
-  return 'complete'
-}
-
-/**
- * Returns the appropriate redirect path based on tutor status and signup completion.
- * status: 'pending' | 'incomplete' | 'active' | 'suspended'
- */
-export async function getSignupRedirect(): Promise<string> {
-  try {
-    const supabase = getSupabase()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return '/login'
-
-    const { data: tutor } = await supabase
-      .from('tutors')
-      .select('status, subjects, availability, reschedule_policy')
-      .eq('id', user.id)
-      .single()
-
-    if (!tutor || tutor.status === 'pending' || !tutor.status) return '/signup'
-    if (tutor.status === 'suspended') return '/login?reason=suspended'
-
-    const hasSubjects = Array.isArray(tutor.subjects) && (tutor.subjects as unknown[]).length > 0
-    if (!hasSubjects) return '/signup/subjects'
-
-    const hasSettings = !!(tutor.availability || tutor.reschedule_policy)
-    if (!hasSettings) return '/signup/settings'
-
-    return '/dashboard'
-  } catch {
-    return '/login'
   }
 }
 
