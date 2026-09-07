@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
+import { useState, useMemo, useRef, useEffect, useCallback, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import {
@@ -317,7 +317,7 @@ function SkeletonRow() {
 
 // ── Main page ─────────────────────────────────────────────────────────────
 
-export default function StudentsPage() {
+function StudentsPageInner() {
   const { subjects: tutorSubjects } = useTutor()
 
   const [students, setStudents]           = useState<Student[]>([])
@@ -546,14 +546,17 @@ export default function StudentsPage() {
 
   async function handleMarkPaid(student: Student) {
     const supabase = createClient()
-    const currentMonth = new Date().toISOString().slice(0, 7)
     const prevStatus  = student.current_payment_status
     const prevPending = student.pending_payment
 
     if (prevPending?.id) {
-      await supabase.from('payments')
+      const { error } = await supabase.from('payments')
         .update({ status: 'paid', paid_at: new Date().toISOString() })
         .eq('id', prevPending.id)
+      if (error) {
+        showToast(`Could not mark ${student.name} as paid. Please try again.`)
+        return
+      }
     }
 
     setStudents(prev => prev.map(s =>
@@ -584,9 +587,13 @@ export default function StudentsPage() {
       .single()
 
     if (existing?.id) {
-      await supabase.from('payments')
+      const { error } = await supabase.from('payments')
         .update({ status: 'pending', paid_at: null })
         .eq('id', existing.id)
+      if (error) {
+        showToast(`Could not revert ${student.name}'s payment. Please try again.`)
+        return
+      }
     }
 
     await loadAll()
@@ -942,5 +949,14 @@ export default function StudentsPage() {
         />
       )}
     </div>
+  )
+}
+
+// useSearchParams() requires a Suspense boundary for static generation.
+export default function StudentsPage() {
+  return (
+    <Suspense fallback={null}>
+      <StudentsPageInner />
+    </Suspense>
   )
 }

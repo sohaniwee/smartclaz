@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import {
@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import dynamic from 'next/dynamic'
 import { DateInput } from '@/components/ui/DateTimeInput'
+import { computeOverdueStatus } from '@/lib/payment-status'
 
 // ── Types (exported for component files) ──────────────────────────────────
 
@@ -558,7 +559,7 @@ function SessionRow({
 
 // ── Main page ─────────────────────────────────────────────────────────────
 
-export default function SessionsPage() {
+function SessionsPageInner() {
   const searchParams = useSearchParams()
   const [sessions, setSessions] = useState<Session[]>([])
   const [stats, setStats] = useState<PageStats>({
@@ -612,7 +613,7 @@ export default function SessionsPage() {
 
     const monthRange = getMonthRange()
 
-    const [sessionsRes, monthSessionsRes, studentsRes, batchesRes, paymentsRes] =
+    const [sessionsRes, monthSessionsRes, studentsRes, batchesRes, paymentsRes, tutorRes] =
       await Promise.all([
         supabase
           .from('sessions')
@@ -637,10 +638,22 @@ export default function SessionsPage() {
           .eq('tutor_id', user.id),
         supabase
           .from('payments')
-          .select('student_id,status,amount_lkr,month_year')
+          .select('student_id,status,amount_lkr,month_year,is_trial_payment')
           .eq('tutor_id', user.id)
           .eq('month_year', CURRENT_MONTH),
+        supabase
+          .from('tutors')
+          .select('monthly_due_date,grace_period_days')
+          .eq('id', user.id)
+          .single(),
       ])
+
+    // Live-computed, not read from the stored payments.status column — same
+    // computeOverdueStatus() helper used by Dashboard/Students/Payments/Batches,
+    // so a 'pending' payment past the tutor's due date + grace period shows as
+    // overdue here too instead of staying amber until the reminders cron runs.
+    const monthlyDueDate  = (tutorRes.data?.monthly_due_date as number | null)  ?? 28
+    const gracePeriodDays = (tutorRes.data?.grace_period_days as number | null) ?? 3
 
     const rawSessions = sessionsRes.data ?? []
     const sessionIds = rawSessions.map(s => s.id as string)
@@ -657,10 +670,19 @@ export default function SessionsPage() {
       (batchesRes.data ?? []).map(b => [b.id as string, b])
     )
     const pMap = new Map(
-      (paymentsRes.data ?? []).map(p => [
-        p.student_id as string,
-        { status: p.status as PaymentStatus, amount_lkr: p.amount_lkr as number },
-      ])
+      (paymentsRes.data ?? []).map(p => {
+        const rawStatus = p.status as PaymentStatus
+        const isTrial = (p.is_trial_payment as boolean | null) ?? false
+        const liveStatus: PaymentStatus =
+          rawStatus === 'pending' && !isTrial &&
+          computeOverdueStatus(monthlyDueDate, gracePeriodDays, p.month_year as string, rawStatus).isOverdue
+            ? 'overdue'
+            : rawStatus
+        return [
+          p.student_id as string,
+          { status: liveStatus, amount_lkr: p.amount_lkr as number },
+        ]
+      })
     )
     setPaymentMap(pMap)
 
@@ -1291,5 +1313,14 @@ export default function SessionsPage() {
         />
       )}
     </div>
+  )
+}
+
+// useSearchParams() requires a Suspense boundary for static generation.
+export default function SessionsPage() {
+  return (
+    <Suspense fallback={null}>
+      <SessionsPageInner />
+    </Suspense>
   )
 }

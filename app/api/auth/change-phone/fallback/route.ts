@@ -60,7 +60,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const otp = generateOtp()
   const now = new Date().toISOString()
 
-  await service
+  const { error: updateErr } = await service
     .from('contact_change_requests')
     .update({
       old_otp_code: otp,
@@ -70,6 +70,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       fallback_channel: 'email',
     })
     .eq('id', requestId)
+
+  if (updateErr) {
+    console.error('[change-phone/fallback] Failed to save new OTP:', updateErr)
+    return NextResponse.json({ error: 'Something went wrong. Please try again.' }, { status: 500 })
+  }
 
   sendOtpEmail(tutor.email, otp, 'confirming your identity to change your phone number').catch(() => {})
 

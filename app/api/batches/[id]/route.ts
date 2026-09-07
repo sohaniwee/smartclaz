@@ -97,7 +97,8 @@ export async function PATCH(
     .single()
 
   if (updateErr || !updated) {
-    return NextResponse.json({ error: updateErr?.message ?? 'Update failed' }, { status: 500 })
+    console.error('[batches] Failed to update batch:', updateErr)
+    return NextResponse.json({ error: 'Failed to update batch' }, { status: 500 })
   }
 
   return NextResponse.json({ batch: updated })
@@ -149,7 +150,8 @@ export async function DELETE(
     .eq('tutor_id', user.id)
 
   if (deleteErr) {
-    return NextResponse.json({ error: deleteErr.message }, { status: 500 })
+    console.error('[batches] Failed to delete batch:', deleteErr)
+    return NextResponse.json({ error: 'Failed to delete batch' }, { status: 500 })
   }
 
   return NextResponse.json({ success: true })

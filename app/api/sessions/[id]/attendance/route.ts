@@ -102,7 +102,8 @@ export async function POST(
     )
 
   if (upsertErr) {
-    return NextResponse.json({ error: upsertErr.message }, { status: 500 })
+    console.error('[sessions/attendance] Failed to save attendance:', upsertErr)
+    return NextResponse.json({ error: 'Failed to save attendance' }, { status: 500 })
   }
 
   // 4. Check whether all students in this session are now marked

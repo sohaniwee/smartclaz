@@ -10,10 +10,10 @@ import { formatDate, formatTime, hashColor } from '@/app/(app)/sessions/page'
 
 export interface MinimalBatchSession {
   id: string
-  batch_id: string | null
+  batch_id?: string | null
   scheduled_at: string
   batch?: { name: string; subject?: string; grade?: string } | null
-  attendance: Array<{ id: string; student_id: string; status: string; marked_at?: string }>
+  attendance: Array<{ id: string; student_id: string; status: AttendanceStatus; marked_at?: string }>
 }
 
 // ── Props ──────────────────────────────────────────────────────────────────

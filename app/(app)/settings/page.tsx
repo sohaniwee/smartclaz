@@ -1947,9 +1947,20 @@ export default function SettingsPage() {
     )
 
     // ── 3. Save to DB ────────────────────────────────────────────────────
-    await supabase.from('tutors').update({ subjects: newSubjects }).eq('id', user.id)
+    const { error: tutorUpdateErr } = await supabase.from('tutors').update({ subjects: newSubjects }).eq('id', user.id)
+    if (tutorUpdateErr) {
+      console.error('[settings] Failed to save subjects:', tutorUpdateErr)
+      setSubjectsError('Could not save. Please try again.')
+      return
+    }
 
-    // Sync batches table: delete then re-insert for this subject
+    // Sync batches table: delete then re-insert for this subject.
+    // ── If the delete succeeds but the re-insert then fails, the tutor
+    //    would otherwise lose every batch for this subject with no
+    //    indication — so both steps are checked, and on failure we leave
+    //    `subjects` (already saved above) as the source of truth and
+    //    surface the error rather than silently updating local state as
+    //    if the batches table were also in sync.
     const batchRows: Record<string, unknown>[] = []
     for (const g of updatedGrades) {
       if (g.has_group && g.batches.length > 0) {
@@ -1971,13 +1982,24 @@ export default function SettingsPage() {
       }
     }
 
-    await supabase.from('batches')
+    const { error: deleteErr } = await supabase.from('batches')
       .delete()
       .eq('tutor_id', user.id)
       .eq('subject', subjectEntry.subject)
 
+    if (deleteErr) {
+      console.error('[settings] Failed to sync batches (delete step):', deleteErr)
+      setSubjectsError('Subject saved, but batches could not be updated. Please check your batches and try again.')
+      return
+    }
+
     if (batchRows.length > 0) {
-      await supabase.from('batches').insert(batchRows)
+      const { error: insertErr } = await supabase.from('batches').insert(batchRows)
+      if (insertErr) {
+        console.error('[settings] Failed to sync batches (re-insert step) — batches for this subject were deleted and NOT recreated:', insertErr)
+        setSubjectsError('Subject saved, but your batches for this subject were lost while saving. Please recreate them and contact support.')
+        return
+      }
     }
 
     setSubjects(newSubjects)
@@ -2209,11 +2231,21 @@ export default function SettingsPage() {
     if (!feeSyncOffer) return
     setFeeSyncing(true)
     const supabase = createClient()
+    const failed: string[] = []
     for (const s of feeSyncOffer.updates) {
-      await supabase.from('students').update({ monthly_fee: s.newFee }).eq('id', s.id)
+      const { error } = await supabase.from('students').update({ monthly_fee: s.newFee }).eq('id', s.id)
+      if (error) {
+        console.error(`[settings] Fee sync failed for student ${s.id} (${s.name}):`, error)
+        failed.push(s.name)
+      }
     }
     setFeeSyncing(false)
     setFeeSyncOffer(null)
+    if (failed.length > 0) {
+      setSubjectsError(
+        `Fee updated for ${feeSyncOffer.updates.length - failed.length} of ${feeSyncOffer.updates.length} students. Failed: ${failed.join(', ')}.`,
+      )
+    }
   }
 
   // ── Render ──────────────────────────────────────────────────────────────

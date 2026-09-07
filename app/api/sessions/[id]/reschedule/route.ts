@@ -58,7 +58,10 @@ export async function POST(
   const newScheduledAt = `${new_date}T${new_time}:00`
 
   // 2. Mark original session as rescheduled
-  await supabase
+  // Checked before proceeding: if this silently failed, step 3 would still
+  // create a brand-new session anyway, leaving two active-looking sessions
+  // for the same slot with no original ever marked as replaced.
+  const { error: markRescheduledErr } = await supabase
     .from('sessions')
     .update({
       status:           'rescheduled',
@@ -66,6 +69,11 @@ export async function POST(
     })
     .eq('id', sessionId)
     .eq('tutor_id', user.id)
+
+  if (markRescheduledErr) {
+    console.error('[sessions/reschedule] Failed to mark original session as rescheduled:', markRescheduledErr)
+    return NextResponse.json({ error: 'Failed to reschedule session' }, { status: 500 })
+  }
 
   // 3. Create new session with same fields but updated scheduled_at
   const { data: newSession, error: newErr } = await supabase
@@ -86,13 +94,18 @@ export async function POST(
 
   if (newErr || !newSession) {
     // Attempt to roll back the status change so data stays consistent
-    await supabase
+    const { error: rollbackErr } = await supabase
       .from('sessions')
       .update({ status: 'scheduled', cancelled_reason: null })
       .eq('id', sessionId)
 
+    if (rollbackErr) {
+      console.error('[sessions/reschedule] Rollback also failed — original session is now stuck as "rescheduled" with no replacement:', rollbackErr)
+    }
+
+    console.error('[sessions/reschedule] Failed to create replacement session:', newErr)
     return NextResponse.json(
-      { error: newErr?.message ?? 'Failed to create rescheduled session' },
+      { error: 'Failed to create rescheduled session' },
       { status: 500 },
     )
   }
@@ -100,10 +113,14 @@ export async function POST(
   const createdSession = newSession as { id: string }
 
   // 4. Link original → new session
-  await supabase
+  const { error: linkErr } = await supabase
     .from('sessions')
     .update({ rescheduled_to: createdSession.id })
     .eq('id', sessionId)
+
+  if (linkErr) {
+    console.error('[sessions/reschedule] Failed to link original session to its replacement (original will show as rescheduled with no visible link):', linkErr)
+  }
 
   // 5. For batch sessions: create attendance records for active batch students
   if (orig.batch_id) {

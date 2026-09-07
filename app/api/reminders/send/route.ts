@@ -149,11 +149,13 @@ export async function GET(req: NextRequest) {
           tutor?.id,
         )
 
-        // Mark reminder as sent
-        await supabase
+        // Mark reminder as sent — checked so a silent failure here doesn't
+        // cause the same reminder to be resent every 15 minutes forever.
+        const { error: flagErr24h } = await supabase
           .from('sessions')
           .update({ reminder_24h_sent: true })
           .eq('id', session.id)
+        if (flagErr24h) throw flagErr24h
 
         results.reminder24h++
       } catch (err) {
@@ -196,10 +198,11 @@ export async function GET(req: NextRequest) {
           tutor?.id,
         )
 
-        await supabase
+        const { error: flagErr1h } = await supabase
           .from('sessions')
           .update({ reminder_1h_sent: true })
           .eq('id', session.id)
+        if (flagErr1h) throw flagErr1h
 
         results.reminder1h++
       } catch (err) {
@@ -245,10 +248,11 @@ export async function GET(req: NextRequest) {
           tutor.id,
         )
 
-        await supabase
+        const { error: flagErr30min } = await supabase
           .from('sessions')
           .update({ tutor_notified_30min: true })
           .eq('id', session.id)
+        if (flagErr30min) throw flagErr30min
 
         results.tutorNotified++
       } catch (err) {
@@ -357,9 +361,10 @@ export async function GET(req: NextRequest) {
               } else if (!autoNotify) {
                 threeDayReminders.push(raw)
               }
-              await supabase.from('payments')
+              const { error: flagErr3day } = await supabase.from('payments')
                 .update(autoNotify ? { reminder_3day_sent: true } : { tutor_notified_3day: true })
                 .eq('id', raw.id)
+              if (flagErr3day) throw flagErr3day
             } catch (err) {
               results.errors.push(`3day reminder ${raw.id}: ${String(err)}`)
             }
@@ -383,9 +388,10 @@ export async function GET(req: NextRequest) {
               } else if (!autoNotify) {
                 dueDateReminders.push(raw)
               }
-              await supabase.from('payments')
+              const { error: flagErrDue } = await supabase.from('payments')
                 .update(autoNotify ? { reminder_due_sent: true } : { tutor_notified_due: true })
                 .eq('id', raw.id)
+              if (flagErrDue) throw flagErrDue
             } catch (err) {
               results.errors.push(`due-date reminder ${raw.id}: ${String(err)}`)
             }
@@ -396,9 +402,17 @@ export async function GET(req: NextRequest) {
           // internal status flag only, never blocks anyone.
           if (isOverdue && raw.status !== 'overdue') {
             try {
-              await supabase.from('payments')
+              // Checked, and the message is only sent after this succeeds:
+              // unlike the 3-day/due-date stages, there's no separate
+              // "already notified" flag for the overdue stage — the status
+              // flip itself is what stops this from firing again next run.
+              // If the message were sent unconditionally on a silent write
+              // failure, the student would get the same overdue notice
+              // every 15 minutes until the write eventually succeeds.
+              const { error: overdueFlagErr } = await supabase.from('payments')
                 .update({ status: 'overdue' })
                 .eq('id', raw.id)
+              if (overdueFlagErr) throw overdueFlagErr
 
               if (autoNotify && recipientPhone) {
                 await sendOverduePaymentReminder(
@@ -560,13 +574,24 @@ export async function GET(req: NextRequest) {
           batch.tutors?.session_duration_mins ?? 60,
         )
 
-        await supabase.from('batches').update({
+        const { error: zoomSaveErr } = await supabase.from('batches').update({
           current_zoom_link:       zoom.joinUrl,
           current_zoom_meeting_id: zoom.meetingId,
           zoom_link_generated_at:  now.toISOString(),
         }).eq('id', batch.id)
 
-        console.log(`🔄 Batch refreshed: ${batch.name} → ${zoom.joinUrl}`)
+        if (zoomSaveErr) {
+          // Non-fatal to the loop (other batches still get refreshed), but
+          // worth surfacing: a new Zoom meeting was created (real API cost)
+          // and never saved — next run will detect zoom_link_generated_at
+          // as stale and generate yet another one.
+          results.errors.push(`batch zoom save [${batch.name}]: ${String(zoomSaveErr)}`)
+          continue
+        }
+
+        // Log the meeting ID, not the full join URL — the URL is effectively
+        // a bearer credential for the meeting and shouldn't land in logs.
+        console.log(`🔄 Batch refreshed: ${batch.name} → meeting ${zoom.meetingId}`)
 
         const { data: batchStudents } = await supabase
           .from('students')

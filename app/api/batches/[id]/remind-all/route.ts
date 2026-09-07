@@ -42,7 +42,8 @@ export async function POST(
     .eq('status', 'active')
 
   if (studentsErr) {
-    return NextResponse.json({ error: studentsErr.message }, { status: 500 })
+    console.error('[batches/remind-all] Failed to load students:', studentsErr)
+    return NextResponse.json({ error: 'Failed to load students' }, { status: 500 })
   }
 
   const activeStudents = (studentsData ?? []) as RawStudent[]

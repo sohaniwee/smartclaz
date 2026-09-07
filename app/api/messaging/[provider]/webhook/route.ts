@@ -5,9 +5,8 @@ import { processWebhook } from '@/lib/bot/process-webhook'
 //
 // URL pattern:  /api/messaging/{provider}/webhook
 //
-// Examples:
+// Currently registered:
 //   /api/messaging/twilio-whatsapp/webhook   ← register this URL in Twilio Console
-//   /api/messaging/telegram/webhook          ← register via Telegram setWebhook API
 //
 // Adding a new provider:
 //   1. Implement MessagingProvider in lib/providers/messaging.ts
@@ -22,7 +21,7 @@ export async function POST(
   return processWebhook(req, provider)
 }
 
-// Some providers (Twilio, Telegram) verify the endpoint with a GET before activating
+// Twilio verifies the endpoint with a GET before activating the webhook
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ provider: string }> },

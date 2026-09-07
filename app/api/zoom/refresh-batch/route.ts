@@ -90,7 +90,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error('[zoom/refresh-batch] Zoom meeting creation failed:', err)
     return NextResponse.json(
-      { error: 'Failed to create Zoom meeting', detail: String(err) },
+      { error: 'Failed to create Zoom meeting' },
       { status: 500 },
     )
   }
@@ -107,6 +107,7 @@ export async function POST(req: NextRequest) {
       zoom_link_generated_at:  now,
     })
     .eq('id', batchId)
+    .eq('tutor_id', tutorId)
 
   if (updateBatchError) {
     console.error('[zoom/refresh-batch] Failed to update batch:', updateBatchError)
@@ -115,21 +116,27 @@ export async function POST(req: NextRequest) {
 
   // ── 6. Update upcoming sessions for this batch ────────────────────────────
   // Stamp the new link on all future scheduled sessions so reminders send
-  // the correct URL.
-  await supabase
+  // the correct URL. This route uses the service-role client (bypasses RLS),
+  // so the tutor_id filter here is the only protection — not just defensive.
+  const { error: updateSessionsError } = await supabase
     .from('sessions')
     .update({
       zoom_link:       zoom.joinUrl,
       zoom_meeting_id: zoom.meetingId,
     })
     .eq('batch_id', batchId)
+    .eq('tutor_id', tutorId)
     .eq('status', 'scheduled')
     .gte('scheduled_at', now)
+
+  if (updateSessionsError) {
+    console.error('[zoom/refresh-batch] Failed to stamp new zoom link on upcoming sessions (batch record was updated, sessions were not):', updateSessionsError)
+  }
 
   // ── 7. Send link to paid students this month ──────────────────────────────
   const sentTo = await sendLinkToPaidStudents(batchId, zoom.joinUrl, tutorId, supabase)
 
-  console.log(`[zoom/refresh-batch] Batch "${batch.name}" refreshed → ${zoom.joinUrl} (${sentTo} students notified)`)
+  console.log(`[zoom/refresh-batch] Batch "${batch.name}" refreshed → meeting ${zoom.meetingId} (${sentTo} students notified)`)
 
   return NextResponse.json({
     success: true,

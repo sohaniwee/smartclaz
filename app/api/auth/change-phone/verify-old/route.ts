@@ -62,7 +62,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const newOtp = generateOtp()
   const now = new Date().toISOString()
 
-  await service
+  const { error: transitionErr } = await service
     .from('contact_change_requests')
     .update({
       old_otp_verified_at: now,
@@ -72,6 +72,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       new_otp_attempts: 0,
     })
     .eq('id', requestId)
+
+  if (transitionErr) {
+    // Don't send an OTP for a code the request row was never transitioned to
+    // expect — verify-new's lookup filters on status='pending_new_otp'.
+    console.error('[change-phone/verify-old] Failed to transition request to pending_new_otp:', transitionErr)
+    return NextResponse.json({ error: 'Something went wrong. Please try again.' }, { status: 500 })
+  }
 
   sendTutorWhatsApp(
     changeReq.new_value,

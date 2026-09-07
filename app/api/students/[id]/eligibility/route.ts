@@ -33,7 +33,8 @@ export async function GET(
     .eq('student_id', studentId)
 
   if (payErr) {
-    return NextResponse.json({ error: payErr.message }, { status: 500 })
+    console.error('[students/eligibility] Failed to check payments:', payErr)
+    return NextResponse.json({ error: 'Failed to check eligibility' }, { status: 500 })
   }
 
   if (paymentCount && paymentCount > 0) {
@@ -49,7 +50,8 @@ export async function GET(
     .eq('student_id', studentId)
 
   if (sessErr) {
-    return NextResponse.json({ error: sessErr.message }, { status: 500 })
+    console.error('[students/eligibility] Failed to check sessions:', sessErr)
+    return NextResponse.json({ error: 'Failed to check eligibility' }, { status: 500 })
   }
 
   if (sessionCount && sessionCount > 0) {

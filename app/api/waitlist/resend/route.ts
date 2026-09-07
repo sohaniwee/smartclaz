@@ -46,9 +46,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Entry is not in offered status' }, { status: 400 })
   }
 
-  await supabase.from('waitlist').update({
+  const { error: resendUpdateErr } = await supabase.from('waitlist').update({
     notified_at: new Date().toISOString(),
-  }).eq('id', waitlistId)
+  }).eq('id', waitlistId).eq('tutor_id', user.id)
+
+  if (resendUpdateErr) {
+    console.error('[waitlist/resend] Failed to update notified_at:', resendUpdateErr)
+    return NextResponse.json({ error: 'Failed to resend offer' }, { status: 500 })
+  }
 
   const batch = entry.batches as { id: string; name: string; subject: string; grade: string; schedule_day: string; schedule_time: string; monthly_fee: number; max_students: number }
 

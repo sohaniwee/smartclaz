@@ -73,7 +73,8 @@ export async function GET(_req: NextRequest) {
   ])
 
   if (batchesRes.error) {
-    return NextResponse.json({ error: batchesRes.error.message }, { status: 500 })
+    console.error('[batches] Failed to load batches:', batchesRes.error)
+    return NextResponse.json({ error: 'Failed to load batches' }, { status: 500 })
   }
 
   // Live-computed, not read from a stored due_date column — same
@@ -230,7 +231,8 @@ export async function POST(req: NextRequest) {
     .single()
 
   if (insertErr || !batch) {
-    return NextResponse.json({ error: insertErr?.message ?? 'Insert failed' }, { status: 500 })
+    console.error('[batches] Failed to create batch:', insertErr)
+    return NextResponse.json({ error: 'Failed to create batch' }, { status: 500 })
   }
 
   try {

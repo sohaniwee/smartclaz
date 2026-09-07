@@ -18,23 +18,20 @@ function getServiceSupabase() {
 }
 
 // ── getTutorByChannel ──────────────────────────────────────────────────────
-// ✅ CURRENT: Queries tutors table by whatsapp_number (for Twilio) or telegram_chat_id.
+// ✅ CURRENT: Queries tutors table by whatsapp_number — WhatsApp (via Twilio)
+//    is the only messaging channel in use.
 // 📝 NOTE: Only returns tutors with status='active' — blocked/suspended tutors get 404.
 
 async function getTutorByChannel(
   channelId: string,
-  providerId: string,
 ): Promise<TutorData | null> {
   const supabase = getServiceSupabase()
 
-  // 📝 NOTE: channelId for WhatsApp is the tutor's registered number (the "To" field from Twilio).
-  //    For Telegram it would be the bot's chat ID. Extend here when adding new providers.
-  const col = providerId === 'telegram' ? 'telegram_chat_id' : 'whatsapp_number'
-
+  // channelId is the tutor's registered WhatsApp number (the "To" field from Twilio).
   const { data, error } = await supabase
     .from('tutors')
     .select('id, name, phone, whatsapp_number, subjects, payment_instructions, reschedule_policy, noshow_policy')
-    .eq(col, channelId)
+    .eq('whatsapp_number', channelId)
     .maybeSingle()
 
   if (error) {
@@ -43,7 +40,7 @@ async function getTutorByChannel(
   }
 
   if (!data) {
-    console.log('[db] getTutorByChannel: no tutor found for', channelId, 'via', providerId)
+    console.log('[db] getTutorByChannel: no tutor found for', channelId)
     return null
   }
 
@@ -365,33 +362,17 @@ export async function processWebhook(
     const rawBody = await req.text()
 
     // ─────────────────────────────────────────────────────────────
-    // Twilio Signature Validation
-    // ✅ CURRENT: Skipped when WHATSAPP_TEST_MODE=true (dev only).
-    // 🚀 BEFORE LAUNCH: Set WHATSAPP_TEST_MODE=false.
-    //    Twilio signs every request with TWILIO_AUTH_TOKEN.
-    //    Unsigned requests are rejected with 403.
+    // Webhook signature validation
+    // ✅ CURRENT: Real HMAC validation lives in each provider's
+    //    verifyWebhook() (see lib/providers/messaging.ts). Skipped only
+    //    when WHATSAPP_TEST_MODE=true, for local/dev testing without a
+    //    real Twilio signature to validate against.
     // 📝 NOTE: Without this, anyone can POST fake student messages
     //    → fake bookings → Zoom links sent → tutor revenue manipulated.
     // ─────────────────────────────────────────────────────────────
     const isTestMode = process.env.WHATSAPP_TEST_MODE === 'true'
 
     if (!isTestMode) {
-      // 🚀 BEFORE LAUNCH: Uncomment this block after installing twilio: npm install twilio
-      //
-      // import twilio from 'twilio'
-      // const signature = req.headers.get('X-Twilio-Signature') || ''
-      // const url = process.env.NEXT_PUBLIC_APP_URL + '/api/whatsapp/webhook'
-      // const params = Object.fromEntries(body)
-      // const valid = twilio.validateRequest(
-      //   process.env.TWILIO_AUTH_TOKEN!,
-      //   signature, url, params
-      // )
-      // if (!valid) {
-      //   return new NextResponse('Forbidden', { status: 403 })
-      // }
-
-      // 2. Verify webhook authenticity via provider-level check.
-      // 🚀 BEFORE LAUNCH: Uncomment Twilio signature validation in lib/providers/messaging.ts
       if (!await messaging.verifyWebhook(req, rawBody)) {
         return new NextResponse('Unauthorized', { status: 401 })
       }
@@ -404,7 +385,7 @@ export async function processWebhook(
     if (!incoming.text) return messaging.buildResponse(null)
 
     // 4. Look up the tutor this webhook is for.
-    const tutor = await getTutorByChannel(incoming.to, providerId)
+    const tutor = await getTutorByChannel(incoming.to)
     if (!tutor) {
       console.warn('[webhook] No tutor found for channel:', incoming.to)
       return new NextResponse('Tutor not found', { status: 404 })
@@ -606,13 +587,19 @@ export async function processWebhook(
           : { data: null }
 
         if (session?.id) {
-          await supabase
+          // Non-fatal — the student is sent joinUrl directly via WhatsApp
+          // below regardless, so a failure here only means the session row
+          // (and thus the dashboard/reminders) won't show the link.
+          const { error: sessionLinkErr } = await supabase
             .from('sessions')
             .update({
               zoom_link:       zoomMeeting.joinUrl,
               zoom_meeting_id: zoomMeeting.meetingId,
             })
             .eq('id', session.id)
+          if (sessionLinkErr) {
+            console.error('[webhook] Failed to save zoom link on session (student was still sent the link directly):', sessionLinkErr)
+          }
         }
 
         // 3. Send Zoom link to student
@@ -766,7 +753,7 @@ export async function processWebhook(
           .eq('batch_id', wj.batchId)
           .eq('status', 'waiting')
 
-        await supabase.from('waitlist').insert({
+        const { error: waitlistInsertErr } = await supabase.from('waitlist').insert({
           tutor_id: tutor.id,
           student_name: wj.studentName,
           student_whatsapp: wj.studentWhatsapp,
@@ -775,7 +762,11 @@ export async function processWebhook(
           batch_id: wj.batchId,
           status: 'waiting',
         })
-        console.log(`[bot] ${wj.studentName} added to waitlist for ${wj.batchName} at position ${(position ?? 0) + 1}`)
+        if (waitlistInsertErr) {
+          console.error('[webhook] waitlistJoin: insert failed — student was told they joined the waitlist but no row exists:', waitlistInsertErr)
+        } else {
+          console.log(`[bot] ${wj.studentName} added to waitlist for ${wj.batchName} at position ${(position ?? 0) + 1}`)
+        }
       } catch (err) {
         console.error('[webhook] waitlistJoin error:', err)
       }
@@ -794,14 +785,18 @@ export async function processWebhook(
     }
 
     // Handle waitlistConfirm side effect
+    // ✅ CURRENT: The waitlist entry is only marked 'enrolled' AFTER the
+    //    student row is successfully created — reversed from an earlier
+    //    version that flipped waitlist status first, which could silently
+    //    lose a signup entirely if the student insert then failed (the
+    //    entry would vanish from "waiting" with no student, payment, or
+    //    batch membership ever created).
     if (sideEffects?.waitlistConfirm) {
       try {
         const supabase = getServiceSupabase()
         const wc = sideEffects.waitlistConfirm
 
-        await supabase.from('waitlist').update({ status: 'enrolled' }).eq('id', wc.waitlistId)
-
-        const { data: newStudent } = await supabase.from('students').insert({
+        const { data: newStudent, error: studentErr } = await supabase.from('students').insert({
           tutor_id: tutor.id,
           name: wc.studentName,
           whatsapp: wc.studentWhatsapp,
@@ -815,8 +810,15 @@ export async function processWebhook(
           consent_at: new Date().toISOString(),
         }).select().single()
 
-        if (newStudent) {
-          await supabase.from('payments').insert({
+        if (studentErr || !newStudent) {
+          console.error('[webhook] waitlistConfirm: student insert failed — waitlist entry left as-is for retry:', studentErr)
+        } else {
+          const { error: waitlistErr } = await supabase.from('waitlist').update({ status: 'enrolled' }).eq('id', wc.waitlistId)
+          if (waitlistErr) {
+            console.error('[webhook] waitlistConfirm: student created but waitlist status update failed (entry may still show as offered):', waitlistErr)
+          }
+
+          const { error: paymentErr } = await supabase.from('payments').insert({
             tutor_id: tutor.id,
             student_id: (newStudent as { id: string }).id,
             amount_lkr: wc.batchFee,
@@ -825,29 +827,37 @@ export async function processWebhook(
             status: 'pending',
             due_date: new Date().toISOString().split('T')[0],
           })
-        }
+          if (paymentErr) {
+            console.error('[webhook] waitlistConfirm: student enrolled but payment record creation failed:', paymentErr)
+          }
 
-        const { count: enrolled } = await supabase
-          .from('students')
-          .select('*', { count: 'exact', head: true })
-          .eq('batch_id', wc.batchId)
-          .eq('status', 'active')
-        const { data: batch } = await supabase
-          .from('batches')
-          .select('max_students')
-          .eq('id', wc.batchId)
-          .single()
-        if (batch && (enrolled ?? 0) >= (batch as { max_students: number }).max_students) {
-          await supabase.from('batches').update({ accepting_new: false }).eq('id', wc.batchId)
-        }
+          const { count: enrolled } = await supabase
+            .from('students')
+            .select('*', { count: 'exact', head: true })
+            .eq('batch_id', wc.batchId)
+            .eq('status', 'active')
+          const { data: batch } = await supabase
+            .from('batches')
+            .select('max_students')
+            .eq('id', wc.batchId)
+            .single()
+          if (batch && (enrolled ?? 0) >= (batch as { max_students: number }).max_students) {
+            const { error: capacityErr } = await supabase.from('batches').update({ accepting_new: false }).eq('id', wc.batchId)
+            if (capacityErr) {
+              console.error('[webhook] waitlistConfirm: failed to close batch to new signups after reaching capacity:', capacityErr)
+            }
+          }
 
-        console.log(`[bot] ${wc.studentName} enrolled from waitlist into batch ${wc.batchName}`)
+          console.log(`[bot] ${wc.studentName} enrolled from waitlist into batch ${wc.batchName}`)
+        }
       } catch (err) {
         console.error('[webhook] waitlistConfirm error:', err)
       }
     }
 
-    // 10. For async providers (Telegram) send the reply via their API.
+    // 10. For async providers (responseMode: 'async') send the reply via their own API
+    //     rather than in the HTTP response body. WhatsApp/Twilio is 'sync', so this is
+    //     currently unused, but kept for any future non-Twilio channel.
     if (messaging.responseMode === 'async') {
       await messaging.send(incoming.from, reply)
     }

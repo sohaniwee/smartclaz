@@ -11,7 +11,7 @@ import { cookies } from 'next/headers'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createServiceClient } from '@supabase/supabase-js'
 import { createZoomMeeting, createBatchZoomMeeting } from '@/lib/zoom'
-import { sendZoomLink } from '@/lib/twilio'
+import { sendZoomLink, DEFAULT_WHATSAPP_FROM } from '@/lib/twilio'
 
 // ── Service role client (bypasses RLS for cross-table writes) ─────────────────
 // 📝 NOTE: Only used server-side. Never exposed to the browser.
@@ -210,13 +210,20 @@ export async function POST(req: NextRequest) {
     .maybeSingle()
 
   if (nextSession && joinUrl && meetingId) {
-    await supabase
+    // Non-fatal — the student is sent joinUrl directly via WhatsApp below
+    // regardless, so a failure here only means the session row (and thus the
+    // dashboard/reminders) won't show the link, not that the student is
+    // missing it.
+    const { error: sessionLinkErr } = await supabase
       .from('sessions')
       .update({
         zoom_link:       joinUrl,
         zoom_meeting_id: meetingId,
       })
       .eq('id', nextSession.id)
+    if (sessionLinkErr) {
+      console.error('[payments/verify] Failed to save zoom link on session (student was still sent the link directly):', sessionLinkErr)
+    }
   }
 
   // ── 8. Format session time for the WhatsApp message ───────────────────────
@@ -248,7 +255,7 @@ export async function POST(req: NextRequest) {
     } else {
       // Zoom link not yet available — send a holding message
       const { sendWhatsApp } = await import('@/lib/twilio')
-      const FROM = process.env.TWILIO_WHATSAPP_FROM ?? '+14155238886'
+      const FROM = process.env.TWILIO_WHATSAPP_FROM ?? DEFAULT_WHATSAPP_FROM
       await sendWhatsApp(
         student.whatsapp,
         FROM,
@@ -261,7 +268,7 @@ export async function POST(req: NextRequest) {
     console.error('[payments/verify] WhatsApp send failed (payment still verified):', err)
   }
 
-  console.log(`[payments/verify] Payment ${paymentId} verified for ${student.name} — Zoom: ${joinUrl ?? 'pending'}`)
+  console.log(`[payments/verify] Payment ${paymentId} verified for ${student.name} — Zoom: ${joinUrl ? `meeting ${meetingId}` : 'pending'}`)
 
   return NextResponse.json({ success: true, zoomLink: joinUrl, zoomSent })
 }

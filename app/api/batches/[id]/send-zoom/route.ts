@@ -59,7 +59,8 @@ export async function POST(
   ])
 
   if (studentsRes.error) {
-    return NextResponse.json({ error: studentsRes.error.message }, { status: 500 })
+    console.error('[batches/send-zoom] Failed to load students:', studentsRes.error)
+    return NextResponse.json({ error: 'Failed to load students' }, { status: 500 })
   }
 
   const paidStudentIds = new Set<string>()

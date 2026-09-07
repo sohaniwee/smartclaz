@@ -139,7 +139,8 @@ export async function PATCH(
     .single()
 
   if (updateErr || !updated) {
-    return NextResponse.json({ error: updateErr?.message ?? 'Update failed' }, { status: 500 })
+    console.error('[sessions] Failed to update session:', updateErr)
+    return NextResponse.json({ error: 'Failed to update session' }, { status: 500 })
   }
 
   return NextResponse.json({ session: updated })
@@ -180,7 +181,8 @@ export async function DELETE(
     .eq('tutor_id', user.id)
 
   if (updateErr) {
-    return NextResponse.json({ error: updateErr.message }, { status: 500 })
+    console.error('[sessions] Failed to cancel session:', updateErr)
+    return NextResponse.json({ error: 'Failed to cancel session' }, { status: 500 })
   }
 
   return NextResponse.json({ success: true })

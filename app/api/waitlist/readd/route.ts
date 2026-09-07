@@ -51,7 +51,8 @@ export async function POST(req: Request) {
   })
 
   if (insertErr) {
-    return NextResponse.json({ error: insertErr.message }, { status: 500 })
+    console.error('[waitlist/readd] Failed to create waiting entry:', insertErr)
+    return NextResponse.json({ error: 'Failed to re-add to waitlist' }, { status: 500 })
   }
 
   console.log(`[waitlist/readd] New waiting entry created from expired entry ${waitlistId}`)

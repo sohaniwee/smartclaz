@@ -61,7 +61,8 @@ export async function POST(
     .single()
 
   if (updateErr) {
-    return NextResponse.json({ error: updateErr.message }, { status: 500 })
+    console.error('[sessions/cancel] Failed to cancel session:', updateErr)
+    return NextResponse.json({ error: 'Failed to cancel session' }, { status: 500 })
   }
 
   // 3. Notify student — stub for Phase 3 Twilio integration

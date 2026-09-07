@@ -38,7 +38,8 @@ export async function POST(
     .eq('tutor_id', user.id)
 
   if (updateErr) {
-    return NextResponse.json({ error: updateErr.message }, { status: 500 })
+    console.error('[batches/zoom] Failed to save zoom link:', updateErr)
+    return NextResponse.json({ error: 'Failed to save zoom link' }, { status: 500 })
   }
 
   // TODO: Notify paid active students via WhatsApp when Twilio is wired

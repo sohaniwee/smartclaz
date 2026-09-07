@@ -56,7 +56,8 @@ export async function POST(
     .eq('status', 'active')
 
   if (studentsErr) {
-    return NextResponse.json({ error: studentsErr.message }, { status: 500 })
+    console.error('[batches/mark-all-paid] Failed to load active students:', studentsErr)
+    return NextResponse.json({ error: 'Failed to load students' }, { status: 500 })
   }
 
   const activeStudents = (studentsData ?? []) as RawStudent[]
@@ -75,7 +76,8 @@ export async function POST(
     .in('student_id', studentIds)
 
   if (paymentsErr) {
-    return NextResponse.json({ error: paymentsErr.message }, { status: 500 })
+    console.error('[batches/mark-all-paid] Failed to load existing payments:', paymentsErr)
+    return NextResponse.json({ error: 'Failed to load payments' }, { status: 500 })
   }
 
   const payments = (existingPayments ?? []) as RawPayment[]
@@ -88,17 +90,29 @@ export async function POST(
   const studentsWithRecord = new Set(payments.map(p => p.student_id))
   const studentsWithoutPayment = activeStudents.filter(s => !studentsWithRecord.has(s.id))
 
+  let updatedCount = 0
+  let insertedCount = 0
+  const errors: string[] = []
+
   if (pendingStudentIds.length > 0) {
-    await supabase.from('payments')
+    const { data: updated, error: updateErr } = await supabase.from('payments')
       .update({ status: 'paid', paid_at: new Date().toISOString() })
       .in('student_id', pendingStudentIds)
       .eq('tutor_id', user.id)
       .eq('month_year', currentMonth)
       .eq('status', 'pending')
+      .select('id')
+
+    if (updateErr) {
+      console.error('[batches/mark-all-paid] Failed to update pending payments to paid:', updateErr)
+      errors.push('Some existing pending payments could not be marked paid.')
+    } else {
+      updatedCount = updated?.length ?? 0
+    }
   }
 
   if (studentsWithoutPayment.length > 0) {
-    await supabase.from('payments').insert(
+    const { data: inserted, error: insertErr } = await supabase.from('payments').insert(
       studentsWithoutPayment.map(s => ({
         tutor_id: user.id,
         student_id: s.id,
@@ -111,10 +125,23 @@ export async function POST(
         due_date: new Date().toISOString().split('T')[0],
         verified_by: 'tutor',
       })),
-    )
+    ).select('id')
+
+    if (insertErr) {
+      console.error('[batches/mark-all-paid] Failed to insert new paid payment records:', insertErr)
+      errors.push('Some students without an existing payment record could not be marked paid.')
+    } else {
+      insertedCount = inserted?.length ?? 0
+    }
   }
 
-  const marked_count = pendingStudentIds.length + studentsWithoutPayment.length
+  const marked_count = updatedCount + insertedCount
+
+  if (errors.length > 0) {
+    // Partial or total failure — report what actually happened instead of
+    // claiming full success, so the tutor knows to double-check the batch.
+    return NextResponse.json({ success: false, marked_count, errors }, { status: 207 })
+  }
 
   return NextResponse.json({ success: true, marked_count })
 }

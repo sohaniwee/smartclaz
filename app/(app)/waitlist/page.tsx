@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import {
@@ -596,7 +596,7 @@ function ExpiredCard({
 
 // ── Main Page ──────────────────────────────────────────────────────────────
 
-export default function WaitlistPage() {
+function WaitlistPageInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
 
@@ -1122,5 +1122,14 @@ export default function WaitlistPage() {
       )}
 
     </div>
+  )
+}
+
+// useSearchParams() requires a Suspense boundary for static generation.
+export default function WaitlistPage() {
+  return (
+    <Suspense fallback={null}>
+      <WaitlistPageInner />
+    </Suspense>
   )
 }

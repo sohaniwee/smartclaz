@@ -58,12 +58,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Batch is still full' }, { status: 409 })
   }
 
-  await supabase.from('waitlist').update({
+  const { error: offerUpdateErr } = await supabase.from('waitlist').update({
     status: 'offered',
     notified_at: new Date().toISOString(),
-  }).eq('id', waitlistId)
+  }).eq('id', waitlistId).eq('tutor_id', user.id)
 
-  await supabase.from('conversations').upsert({
+  if (offerUpdateErr) {
+    console.error('[waitlist/offer] Failed to mark entry offered:', offerUpdateErr)
+    return NextResponse.json({ error: 'Failed to make offer' }, { status: 500 })
+  }
+
+  const { error: conversationErr } = await supabase.from('conversations').upsert({
     tutor_id: user.id,
     student_whatsapp: entry.student_whatsapp,
     status: 'bot',
@@ -77,6 +82,10 @@ export async function POST(req: Request) {
     },
     last_message_at: new Date().toISOString(),
   }, { onConflict: 'tutor_id,student_whatsapp' })
+
+  if (conversationErr) {
+    console.error('[waitlist/offer] Failed to seed bot conversation context — student reply to this offer will not be understood:', conversationErr)
+  }
 
   const offerMessage =
     `Hi ${entry.student_name}! 🎉\n\n` +

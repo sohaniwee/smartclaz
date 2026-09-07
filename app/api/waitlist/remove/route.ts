@@ -43,7 +43,8 @@ export async function POST(req: Request) {
     .eq('tutor_id', user.id)
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    console.error('[waitlist/remove] Failed to expire entry:', error)
+    return NextResponse.json({ error: 'Failed to remove from waitlist' }, { status: 500 })
   }
 
   console.log(`[waitlist/remove] Entry ${waitlistId} expired by tutor ${user.id}`)

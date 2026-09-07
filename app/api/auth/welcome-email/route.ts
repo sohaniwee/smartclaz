@@ -14,13 +14,12 @@ import { sendWelcomeEmail }   from '@/lib/resend'
 export async function POST(request: Request) {
   try {
     const body = await request.json() as { name?: string; email?: string; dev?: boolean }
-    const { name, email } = body
 
     // ⚠️ DEV ONLY — Remove before launch
     // Skips Supabase session check so the welcome email can be tested without a real session.
     // At launch: delete the dev block below — auth check below will enforce it.
     if (process.env.NODE_ENV === 'development' && body.dev) {
-      if (name && email) await sendWelcomeEmail(name, email)
+      if (body.name && body.email) await sendWelcomeEmail(body.name, body.email)
       return Response.json({ ok: true })
     }
 
@@ -43,6 +42,18 @@ export async function POST(request: Request) {
     if (!user) {
       return Response.json({ error: 'Not authenticated' }, { status: 401 })
     }
+
+    // Fetch the tutor's own name/email server-side rather than trusting the
+    // request body — otherwise any authenticated tutor could send a welcome
+    // email to an arbitrary address of their choosing.
+    const { data: tutor } = await supabase
+      .from('tutors')
+      .select('name, email')
+      .eq('id', user.id)
+      .single()
+
+    const email = tutor?.email ?? user.email
+    const name  = tutor?.name
 
     if (!name || !email) {
       return Response.json({ error: 'Missing name or email' }, { status: 400 })

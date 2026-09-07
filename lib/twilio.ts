@@ -129,7 +129,11 @@ export async function sendWhatsApp(
 // ── Specialised message senders ───────────────────────────────────────────────
 // 📝 NOTE: All senders default from to TWILIO_WHATSAPP_FROM env var.
 
-const FROM = () => process.env.TWILIO_WHATSAPP_FROM ?? '+14155238886'
+// Twilio's public WhatsApp sandbox number — used only as a fallback default
+// when TWILIO_WHATSAPP_FROM isn't configured. Exported so other call sites
+// (e.g. payments/verify) don't duplicate this literal.
+export const DEFAULT_WHATSAPP_FROM = '+14155238886'
+const FROM = () => process.env.TWILIO_WHATSAPP_FROM ?? DEFAULT_WHATSAPP_FROM
 
 /**
  * Send a Zoom link to a student after payment is verified.

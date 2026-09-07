@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { X, TrendingUp } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
+import { computeOverdueStatus } from '@/lib/payment-status'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -78,22 +79,45 @@ export default function PaymentHistoryPanel({
 }: PaymentHistoryPanelProps) {
   const [history, setHistory] = useState<HistoryPayment[]>([])
   const [loading, setLoading] = useState(true)
+  const [dueSettings, setDueSettings] = useState<{ monthlyDueDate: number; gracePeriodDays: number } | null>(null)
 
   useEffect(() => {
     async function load() {
       setLoading(true)
       const supabase = createClient()
-      const { data } = await supabase
-        .from('payments')
-        .select('id, amount_lkr, month_year, status, paid_at, payment_reference, is_trial_payment, method')
-        .eq('student_id', studentId)
-        .eq('tutor_id', tutorId)
-        .order('created_at', { ascending: false })
-      setHistory((data ?? []) as HistoryPayment[])
+      const [historyRes, tutorRes] = await Promise.all([
+        supabase
+          .from('payments')
+          .select('id, amount_lkr, month_year, status, paid_at, payment_reference, is_trial_payment, method')
+          .eq('student_id', studentId)
+          .eq('tutor_id', tutorId)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('tutors')
+          .select('monthly_due_date, grace_period_days')
+          .eq('id', tutorId)
+          .single(),
+      ])
+      setHistory((historyRes.data ?? []) as HistoryPayment[])
+      setDueSettings({
+        monthlyDueDate:  (tutorRes.data?.monthly_due_date as number | null)  ?? 28,
+        gracePeriodDays: (tutorRes.data?.grace_period_days as number | null) ?? 3,
+      })
       setLoading(false)
     }
     load()
   }, [studentId, tutorId])
+
+  // Live-computed, not read from the stored status column — same
+  // computeOverdueStatus() helper used by Dashboard/Students/Payments/Batches,
+  // so a still-'pending' row past the tutor's due date + grace period shows
+  // as overdue here too instead of staying amber indefinitely.
+  function displayStatus(p: HistoryPayment): string {
+    if (p.is_trial_payment || p.status !== 'pending' || !dueSettings) return p.status
+    return computeOverdueStatus(dueSettings.monthlyDueDate, dueSettings.gracePeriodDays, p.month_year, p.status).isOverdue
+      ? 'overdue'
+      : p.status
+  }
 
   const totalCollected = history
     .filter(p => p.status === 'paid')
@@ -167,7 +191,7 @@ export default function PaymentHistoryPanel({
                       <p className="text-[0.84rem] font-semibold text-[#1a1a2e]">
                         {formatMonthYear(p.month_year)}
                       </p>
-                      <StatusPill status={p.status} isTrial={p.is_trial_payment} />
+                      <StatusPill status={displayStatus(p)} isTrial={p.is_trial_payment} />
                     </div>
                     {p.payment_reference && (
                       <p className="text-[0.68rem] font-mono text-[#6c757d] mt-0.5">
@@ -182,7 +206,7 @@ export default function PaymentHistoryPanel({
                     )}
                   </div>
                   <p className={`text-[0.95rem] font-extrabold tracking-tight flex-shrink-0 ${
-                    p.status === 'paid' ? 'text-[#2f9e44]' : p.status === 'overdue' ? 'text-[#c92a2a]' : 'text-[#1a1a2e]'
+                    displayStatus(p) === 'paid' ? 'text-[#2f9e44]' : displayStatus(p) === 'overdue' ? 'text-[#c92a2a]' : 'text-[#1a1a2e]'
                   }`}>
                     LKR {p.amount_lkr.toLocaleString()}
                   </p>

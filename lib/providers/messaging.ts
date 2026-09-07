@@ -1,9 +1,37 @@
 import { NextRequest, NextResponse } from 'next/server'
+import crypto from 'crypto'
+
+// Twilio signs each webhook request with an HMAC-SHA1 of the full request URL
+// plus every POST param (sorted by key, concatenated as key+value with no
+// delimiter), keyed with the account's auth token, base64-encoded. This is
+// the same algorithm as the `twilio` npm package's `validateRequest()` — kept
+// dependency-free here since Node's built-in `crypto` covers it directly.
+// See: https://www.twilio.com/docs/usage/security#validating-requests
+function validateTwilioSignature(
+  authToken: string,
+  signature: string,
+  url: string,
+  params: URLSearchParams,
+): boolean {
+  const sortedKeys = Array.from(new Set(params.keys())).sort()
+  let data = url
+  for (const key of sortedKeys) {
+    for (const value of params.getAll(key)) {
+      data += key + value
+    }
+  }
+  const expected = crypto.createHmac('sha1', authToken).update(data, 'utf8').digest('base64')
+
+  const sigBuf = Buffer.from(signature)
+  const expBuf = Buffer.from(expected)
+  if (sigBuf.length !== expBuf.length) return false
+  return crypto.timingSafeEqual(sigBuf, expBuf)
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // MESSAGING PROVIDER INTERFACE
 //
-// To add a new provider (Telegram, SMS, Line, Viber, …):
+// WhatsApp (via Twilio) is the only channel in use. To add another provider:
 //   1. Implement MessagingProvider below
 //   2. Add an entry to PROVIDERS at the bottom
 //   3. Point the platform's webhook to /api/messaging/{id}/webhook
@@ -11,7 +39,7 @@ import { NextRequest, NextResponse } from 'next/server'
 // ════════════════════════════════════════════════════════════════════════════
 
 export interface IncomingMessage {
-  /** Normalised sender ID — phone number, Telegram user ID, etc. */
+  /** Normalised sender ID — the student's WhatsApp phone number. */
   from: string
   /** Normalised channel ID the tutor uses — their number / bot chat ID. */
   to: string
@@ -67,13 +95,17 @@ const twilioWhatsApp: MessagingProvider = {
   responseMode: 'sync',
 
   async verifyWebhook(req, rawBody) {
-    // TODO: validate Twilio request signature
-    // const sig = req.headers.get('x-twilio-signature') ?? ''
-    // const url = `${process.env.NEXT_PUBLIC_APP_URL}${req.nextUrl.pathname}`
-    // const params = Object.fromEntries(new URLSearchParams(rawBody))
-    // return twilio.validateRequest(process.env.TWILIO_AUTH_TOKEN!, sig, url, params)
-    void req; void rawBody
-    return true
+    const authToken = process.env.TWILIO_AUTH_TOKEN
+    if (!authToken) {
+      console.error('[twilio-whatsapp] TWILIO_AUTH_TOKEN not set — rejecting webhook (cannot verify signature)')
+      return false
+    }
+    const signature = req.headers.get('x-twilio-signature') ?? ''
+    if (!signature) return false
+
+    const url = `${process.env.NEXT_PUBLIC_APP_URL ?? ''}${req.nextUrl.pathname}${req.nextUrl.search}`
+    const params = new URLSearchParams(rawBody)
+    return validateTwilioSignature(authToken, signature, url, params)
   },
 
   parseRawBody(rawBody) {
@@ -103,62 +135,11 @@ const twilioWhatsApp: MessagingProvider = {
   },
 }
 
-// ── Telegram ─────────────────────────────────────────────────────────────────
-// Register webhook with:
-//   POST https://api.telegram.org/bot{TOKEN}/setWebhook
-//   url: https://your-app.com/api/messaging/telegram/webhook
-//   secret_token: process.env.TELEGRAM_WEBHOOK_SECRET
-//
-// Env vars needed:
-//   TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
-
-const telegram: MessagingProvider = {
-  id:           'telegram',
-  name:         'Telegram',
-  responseMode: 'async', // reply sent via Bot API, not in the HTTP response
-
-  async verifyWebhook(req, _rawBody) {
-    // TODO:
-    // const token = req.headers.get('x-telegram-bot-api-secret-token')
-    // return token === process.env.TELEGRAM_WEBHOOK_SECRET
-    void req
-    return true
-  },
-
-  parseRawBody(rawBody) {
-    const body = JSON.parse(rawBody) as {
-      message?: { from: { id: number }; chat: { id: number }; text?: string }
-    }
-    const msg = body.message
-    return {
-      from: String(msg?.from?.id ?? ''),
-      to:   String(msg?.chat?.id ?? ''),
-      text: (msg?.text ?? '').trim(),
-    }
-  },
-
-  async send(to, text) {
-    // TODO:
-    // await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    //   method:  'POST',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body:    JSON.stringify({ chat_id: to, text, parse_mode: 'Markdown' }),
-    // })
-    console.log(`[telegram → ${to}]`, text)
-  },
-
-  buildResponse(_reply) {
-    // Telegram only needs a 200 ACK; the actual reply is sent via send() above
-    return NextResponse.json({ ok: true })
-  },
-}
-
 // ── Registry ──────────────────────────────────────────────────────────────────
+// Only WhatsApp (via Twilio) is in use — no other channel is planned.
 
 const PROVIDERS: Record<string, MessagingProvider> = {
   [twilioWhatsApp.id]: twilioWhatsApp,
-  [telegram.id]:       telegram,
-  // Add new providers here ↓
 }
 
 export function getMessagingProvider(id: string): MessagingProvider {

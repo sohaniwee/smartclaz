@@ -329,10 +329,26 @@ function BatchCard({
                         body: `This will mark all pending payments for ${batch.name} as paid for this month.`,
                         confirmLabel: 'Mark all paid',
                         onConfirm: async () => {
-                          const res = await fetch(`/api/batches/${batch.id}/mark-all-paid`, { method: 'POST' })
-                          const json = res.ok ? await res.json() as { marked_count: number } : null
-                          if (json) { showToast(`${json.marked_count} payment${json.marked_count !== 1 ? 's' : ''} marked as paid`, 'success'); reload() }
-                          else showToast('Failed to mark payments', 'error')
+                          let json: { success: boolean; marked_count: number; errors?: string[] } | null = null
+                          try {
+                            json = await (await fetch(`/api/batches/${batch.id}/mark-all-paid`, { method: 'POST' })).json()
+                          } catch {
+                            json = null
+                          }
+                          if (!json) {
+                            showToast('Failed to mark payments', 'error')
+                          } else if (!json.success) {
+                            showToast(
+                              json.marked_count > 0
+                                ? `Only ${json.marked_count} payment${json.marked_count !== 1 ? 's' : ''} marked as paid — some failed, please check the batch`
+                                : 'Failed to mark payments — please try again',
+                              'error',
+                            )
+                            reload()
+                          } else {
+                            showToast(`${json.marked_count} payment${json.marked_count !== 1 ? 's' : ''} marked as paid`, 'success')
+                            reload()
+                          }
                         },
                       })
                     }}

@@ -158,7 +158,8 @@ export async function GET(req: NextRequest) {
     ])
 
   if (sessionsRes.error) {
-    return NextResponse.json({ error: sessionsRes.error.message }, { status: 500 })
+    console.error('[sessions] Failed to load sessions:', sessionsRes.error)
+    return NextResponse.json({ error: 'Failed to load sessions' }, { status: 500 })
   }
 
   // Build lookup maps
@@ -276,6 +277,32 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'scheduled_at is required' }, { status: 400 })
   }
 
+  // Ownership check: student_id/batch_id come straight from the request body,
+  // so a caller could otherwise reference another tutor's student or batch —
+  // verify both belong to the authenticated tutor before ever inserting.
+  if (student_id) {
+    const { data: ownedStudent } = await supabase
+      .from('students')
+      .select('id')
+      .eq('id', student_id as string)
+      .eq('tutor_id', user.id)
+      .maybeSingle()
+    if (!ownedStudent) {
+      return NextResponse.json({ error: 'Student not found' }, { status: 404 })
+    }
+  }
+  if (batch_id) {
+    const { data: ownedBatch } = await supabase
+      .from('batches')
+      .select('id')
+      .eq('id', batch_id as string)
+      .eq('tutor_id', user.id)
+      .maybeSingle()
+    if (!ownedBatch) {
+      return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
+    }
+  }
+
   // Derive session_type if not provided
   const resolvedType =
     (session_type as string | undefined) ??
@@ -299,7 +326,8 @@ export async function POST(req: NextRequest) {
     .single()
 
   if (insertErr || !session) {
-    return NextResponse.json({ error: insertErr?.message ?? 'Insert failed' }, { status: 500 })
+    console.error('[sessions] Failed to create session:', insertErr)
+    return NextResponse.json({ error: 'Failed to create session' }, { status: 500 })
   }
 
   const createdSession = session as { id: string }

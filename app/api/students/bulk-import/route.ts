@@ -249,7 +249,8 @@ export async function POST(req: NextRequest) {
           .single()
 
         if (studentErr || !student) {
-          throw new Error(studentErr?.message ?? 'Student insert failed')
+          console.error(`[bulk-import] Student insert failed for row ${rowData._rowNumber} "${rowData.name}":`, studentErr)
+          throw new Error('Could not save this student — please check the row for invalid or duplicate data')
         }
 
         // ── 4e. Insert payment record ────────────────────────────────────

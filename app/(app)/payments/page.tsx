@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
+import { useState, useMemo, useEffect, useRef, useCallback, Suspense } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import {
@@ -477,7 +477,7 @@ function AlltimeChart({ data }: { data: BreakdownRow[] }) {
 
 const CURRENT_MONTH = new Date().toISOString().slice(0, 7)
 
-export default function PaymentsPage() {
+function PaymentsPageInner() {
   const searchParams = useSearchParams()
   const router = useRouter()
   const studentIdParam = searchParams.get('student')
@@ -1312,5 +1312,17 @@ export default function PaymentsPage() {
         />
       )}
     </div>
+  )
+}
+
+// useSearchParams() (used above for ?student= and ?tab= deep links) requires
+// a Suspense boundary for static generation — this only ever surfaced once
+// the project's TypeScript errors were fixed and the build reached the
+// prerendering stage for the first time.
+export default function PaymentsPage() {
+  return (
+    <Suspense fallback={null}>
+      <PaymentsPageInner />
+    </Suspense>
   )
 }

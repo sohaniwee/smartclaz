@@ -20,8 +20,8 @@ export function useCountUp({
   separator = ',',
 }: UseCountUpOptions) {
   const [value, setValue] = useState(start)
-  const frameRef = useRef<number>()
-  const startTimeRef = useRef<number>()
+  const frameRef = useRef<number | undefined>(undefined)
+  const startTimeRef = useRef<number | undefined>(undefined)
 
   useEffect(() => {
     setValue(start)
