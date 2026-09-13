@@ -641,15 +641,6 @@ export default function SignupPage() {
               </button>
             </form>
 
-            <div className="mt-5 rounded-[10px] bg-[#f8f9fa] border border-[#dee2e6] px-4 py-3 space-y-1">
-              <p className="text-[0.72rem] text-[#6c757d] leading-relaxed">
-                <span className="font-semibold text-[#343a40]">Your email</span> keeps your account safe and is used for verification.
-              </p>
-              <p className="text-[0.72rem] text-[#6c757d] leading-relaxed">
-                <span className="font-semibold text-[#343a40]">Your phone</span> connects your WhatsApp and will be used for SMS login later.
-              </p>
-            </div>
-
             <p className="mt-4 text-center text-xs text-[#6c757d]">
               Already have an account?{' '}
               <button
