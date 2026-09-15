@@ -13,7 +13,7 @@ export interface EnrichedPayment {
   student_whatsapp: string
   subject: string
   grade: string
-  class_type: 'individual' | 'batch' | 'trial'
+  class_type: 'individual' | 'group' | 'trial'
   batch_name?: string | null
   amount_lkr: number
   full_fee?: number | null
@@ -176,7 +176,7 @@ export default function PaymentCard({
             <p className="text-[0.9rem] font-bold text-[#1a1a2e] truncate">{p.student_name}</p>
             <p className="text-[0.72rem] text-[#6c757d] truncate">
               {p.subject} · {p.grade}
-              {p.class_type === 'batch' && p.batch_name
+              {p.class_type === 'group' && p.batch_name
                 ? ` · ${p.batch_name}`
                 : p.class_type === 'individual'
                 ? ' · Individual'
@@ -417,7 +417,7 @@ export function PaymentRow({
         </div>
         <p className="text-[0.7rem] text-[#6c757d] truncate">
           {p.subject} · {p.grade}
-          {p.class_type === 'batch' && p.batch_name ? ` · ${p.batch_name}` : ''}
+          {p.class_type === 'group' && p.batch_name ? ` · ${p.batch_name}` : ''}
           {type === 'overdue' ? ` · ${p.daysPastDue}d overdue` : ''}
           {p.payment_reference ? ` · ref: ${p.payment_reference}` : ''}
         </p>

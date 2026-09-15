@@ -20,7 +20,7 @@ import GettingStartedChecklist from '@/components/GettingStartedChecklist'
 import GettingStartedWizard from '@/components/GettingStarted'
 import type { SubjectEntry } from '@/lib/types/subjects'
 import CountUp from '@/components/CountUp'
-import { computeOverdueStatus } from '@/lib/payment-status'
+import { computeOverdueStatus, computeEscalationStatus } from '@/lib/payment-status'
 import ManualModeHint from '@/components/ManualModeHint'
 import OverduePaymentsCard, { type OverduePaymentItem } from '@/components/OverduePaymentsCard'
 
@@ -69,6 +69,7 @@ interface AtRiskStudent {
   amountLkr: number
   daysOverdue: number
   paymentId: string
+  isEscalated: boolean
 }
 
 interface MissedSession {
@@ -451,6 +452,7 @@ export default function DashboardPage() {
   const [tutorBatches,      setTutorBatches]      = useState<Batch[]>([])
   const [tutorMonthlyDueDate, setTutorMonthlyDueDate] = useState<number | null>(null)
   const [tutorAutoNotifyOverdue, setTutorAutoNotifyOverdue] = useState(true)
+  const [tutorBlockReminderDays, setTutorBlockReminderDays] = useState<number | null>(null)
   const [showManualHint, setShowManualHint] = useState(false)
   const [tutorAvailability,   setTutorAvailability]   = useState<Array<{ day: string; enabled: boolean; start: string; end: string }>>([])
   const [sessionDuration,     setSessionDuration]     = useState<string>('')
@@ -491,7 +493,7 @@ export default function DashboardPage() {
     try {
       const { data } = await supabase
         .from('tutors')
-        .select('name, created_at, subjects, monthly_due_date, auto_notify_overdue, manual_mode_hint_seen, whatsapp_number, availability, notification_prefs, onboarding_complete, teaching_style')
+        .select('name, created_at, subjects, monthly_due_date, auto_notify_overdue, manual_mode_hint_seen, whatsapp_number, availability, notification_prefs, onboarding_complete, teaching_style, block_reminder_enabled, block_reminder_days')
         .eq('id', userId)
         .single()
       if (data) {
@@ -505,6 +507,8 @@ export default function DashboardPage() {
         const autoNotify = (data.auto_notify_overdue as boolean | null) ?? true
         setTutorAutoNotifyOverdue(autoNotify)
         setShowManualHint(!autoNotify && !(data.manual_mode_hint_seen as boolean | null))
+        const blockReminderEnabled = (data.block_reminder_enabled as boolean | null) ?? true
+        setTutorBlockReminderDays(blockReminderEnabled ? (data.block_reminder_days as number | null) ?? null : null)
         if (Array.isArray(data.availability)) setTutorAvailability(data.availability as Array<{ day: string; enabled: boolean; start: string; end: string }>)
         const prefs = data.notification_prefs as Record<string, unknown> | null
         if (prefs?.session_duration) setSessionDuration(String(prefs.session_duration))
@@ -771,15 +775,17 @@ export default function DashboardPage() {
       // computeOverdueStatus() helper used by Students, Payments and Batches,
       // so this list can never disagree with those pages.
       const [tutorRes, paymentsRes] = await Promise.all([
-        supabase.from('tutors').select('monthly_due_date, grace_period_days').eq('id', userId).single(),
+        supabase.from('tutors').select('monthly_due_date, grace_period_days, block_reminder_enabled, block_reminder_days').eq('id', userId).single(),
         supabase.from('payments')
           .select('id, student_id, amount_lkr, month_year, status, is_trial_payment, students(name)')
           .eq('tutor_id', userId)
           .in('status', ['pending', 'overdue']),
       ])
 
-      const monthlyDueDate  = (tutorRes.data?.monthly_due_date as number | null)  ?? 28
-      const gracePeriodDays = (tutorRes.data?.grace_period_days as number | null) ?? 3
+      const monthlyDueDate         = (tutorRes.data?.monthly_due_date as number | null)  ?? 28
+      const gracePeriodDays        = (tutorRes.data?.grace_period_days as number | null) ?? 3
+      const blockReminderEnabled   = (tutorRes.data?.block_reminder_enabled as boolean | null) ?? true
+      const blockReminderDays      = (tutorRes.data?.block_reminder_days as number | null) ?? null
 
       type RawAtRisk = {
         id: string
@@ -796,12 +802,14 @@ export default function DashboardPage() {
         .map(p => {
           const student = Array.isArray(p.students) ? p.students[0] : p.students
           const overdue = computeOverdueStatus(monthlyDueDate, gracePeriodDays, p.month_year ?? CURRENT_MONTH, p.status)
+          const escalation = computeEscalationStatus(overdue.daysOverdue, blockReminderEnabled, blockReminderDays)
           const student_: AtRiskStudent = {
             paymentId:   p.id,
             studentId:   p.student_id,
             studentName: student?.name ?? 'Unknown',
             amountLkr:   p.amount_lkr ?? 0,
             daysOverdue: overdue.daysOverdue,
+            isEscalated: escalation.isEscalated,
           }
           return { student_, isOverdue: overdue.isOverdue }
         })
@@ -1551,9 +1559,11 @@ export default function DashboardPage() {
                       studentName: s.studentName,
                       amountLkr:   s.amountLkr,
                       daysOverdue: s.daysOverdue,
+                      isEscalated: s.isEscalated,
                     }))}
                     totalCount={atRisk.length}
                     autoNotifyMode={tutorAutoNotifyOverdue}
+                    blockReminderDays={tutorBlockReminderDays}
                     onChanged={() => {
                       if (!tutorId) return
                       const supabase = createClient()

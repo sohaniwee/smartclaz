@@ -42,3 +42,25 @@ export function computeOverdueStatus(
 
   return { isOverdue, daysOverdue, dueDate, graceEndDate }
 }
+
+// ── Escalation ("blocking nudge") ────────────────────────────────────────────
+// Separate, tutor-controlled preference layered on top of computeOverdueStatus.
+// This never blocks a student — blocking is always a manual tutor click via
+// the [Block student] button. Escalation only makes an already-overdue
+// payment's card louder/more urgent once it's been overdue for long enough
+// that the tutor is likely to have forgotten about it.
+
+export interface EscalationStatus {
+  isEscalated: boolean
+}
+
+export function computeEscalationStatus(
+  daysOverdue: number,
+  blockReminderEnabled: boolean | null,
+  blockReminderDays: number | null,
+): EscalationStatus {
+  if (!blockReminderEnabled || !blockReminderDays) {
+    return { isEscalated: false }
+  }
+  return { isEscalated: daysOverdue >= blockReminderDays }
+}

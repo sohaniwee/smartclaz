@@ -112,7 +112,9 @@ export interface TutorRow {
   notification_prefs: NotificationPrefs
   /** Day of month (1–28) when monthly fees are due */
   monthly_due_date: number
-  /** Days after due_date before student is blocked */
+  /** Days after due_date before a payment is marked overdue. Not tied to
+   * blocking — blocking a student's access is always a separate, manual
+   * tutor action. */
   grace_period_days: number
   /** Running total of outbound WhatsApp messages sent */
   message_count: number

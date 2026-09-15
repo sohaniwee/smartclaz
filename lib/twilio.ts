@@ -250,6 +250,20 @@ export async function sendOverduePaymentReminder(
 }
 
 /**
+ * Send a waitlist-spot offer to a student. Called from
+ * app/api/waitlist/offer/route.ts when a tutor manually offers an open
+ * spot — previously a TODO stub that never actually sent anything, so the
+ * student had no way to know a spot had opened up.
+ */
+export async function sendWaitlistOffer(
+  studentPhone: string,
+  tutorId: string,
+  message: string,
+): Promise<void> {
+  await sendWhatsApp(studentPhone, FROM(), message, tutorId)
+}
+
+/**
  * Send a notification message to the tutor (not the student).
  * Used for: new bookings, payment receipts, bot-stuck alerts, etc.
  */

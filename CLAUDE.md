@@ -240,8 +240,15 @@ tutors (
   subjects jsonb,          -- [{subject, grade, individual_fee, group_fee, trial_fee}]
   availability jsonb,      -- [{day, start_time, end_time}]
   payment_instructions text,
-  reschedule_policy text,  -- 'auto_24h' | 'auto_48h' | 'manual'
-  noshow_policy text,      -- 'forfeit' | 'reschedule' | 'ask'
+  reschedule_policy text,  -- legacy, pre-split — kept for backward compat, no longer read
+  noshow_policy text,      -- legacy, pre-split — kept for backward compat, no longer read
+  -- Freeform text, split by class type since there's no self-service slot
+  -- picker: individual reschedules are always confirmed manually by the
+  -- tutor; a batch has one fixed weekly slot with no per-student reschedule.
+  reschedule_policy_individual text,
+  reschedule_policy_group text,
+  noshow_policy_individual text,
+  noshow_policy_group text,
   notification_prefs jsonb,
   monthly_due_date int,    -- day of month (e.g. 5)
   grace_period_days int,
@@ -406,7 +413,7 @@ message_logs (
 - No-show policy (forfeit / offer reschedule / ask each time)
 - Group minimum students to run (1 / 3 / 5 / ask me)
 - Monthly fee due date (day of month)
-- Grace period before blocking access (3 / 5 / 7 days)
+- Grace period before marked overdue (3 / 5 / 7 days)
 - Notification preferences (per event: App / WhatsApp / Both)
 - WhatsApp Business number connection
 - On success → redirect to /dashboard
@@ -566,8 +573,17 @@ PAYMENT RULES:
 - No automatic payment processing in MVP
 - Tutor manually verifies each payment (1 tap)
 - After tutor confirms → Zoom link sent automatically
-- Monthly fee reminders: 3 days before, on due date, 3 days after, 7 days after
-- After grace period → student status = 'blocked' → no Zoom link sent
+- Monthly fee reminders (only if the tutor chose auto_notify_overdue=true — see below):
+  3 days before due date, on the due date, and once if it becomes overdue. No repeated
+  +3/+7-day follow-ups. If the tutor chose manual mode, students are messaged by the
+  tutor, not the system.
+- After grace period → payment marked 'overdue' (no Zoom link sent, since it isn't 'paid') —
+  this is a status label only, it never blocks the student
+- Blocking a student's access is ALWAYS a manual tutor action (the [Block student] button) —
+  never automatic, regardless of any settings below
+- Optional escalation ("blocking nudge"): tutor can opt in to a louder visual flag once a
+  payment has been overdue for N days (block_reminder_enabled / block_reminder_days on
+  tutors), purely to jog the tutor's memory — still never blocks anyone automatically
 
 ZOOM RULES:
 - Fresh Zoom link generated per session (not reused)

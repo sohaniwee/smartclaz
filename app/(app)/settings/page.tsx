@@ -34,6 +34,7 @@ import {
   SlidersHorizontal,
   Clock,
   Calendar,
+  Flag,
 } from 'lucide-react'
 import { maskEmail, maskPhone } from '@/lib/mask'
 import StepBadge from '@/components/StepBadge'
@@ -92,8 +93,6 @@ type PhoneModalStep    = 'enter-new' | 'verify-old' | 'identity-confirmed' | 've
 
 type NotifChannel      = 'app' | 'whatsapp' | 'both'
 type NotifPrefs        = Record<string, NotifChannel>
-type RescheduleOption  = 'none' | 'auto_24h' | 'auto_48h' | 'custom'
-type NoshowOption      = 'forfeit' | 'reschedule' | 'custom'
 
 // Subjects edit draft types
 type TrialTypeDraft = 'none' | 'free' | 'paid'
@@ -139,14 +138,19 @@ type TutorRow = {
   email: string | null
   whatsapp_number: string | null
   subjects: SubjectEntry[] | null
-  reschedule_policy: string | null
-  noshow_policy: string | null
+  teaching_style: 'individual' | 'group' | 'both' | null
+  reschedule_policy_individual: string | null
+  reschedule_policy_group: string | null
+  noshow_policy_individual: string | null
+  noshow_policy_group: string | null
   monthly_due_date: number | null
   grace_period_days: number | null
   payment_instructions: string | null
   notification_prefs: { events?: NotifPrefs } | null
   auto_notify_overdue: boolean | null
   manual_mode_hint_seen: boolean | null
+  block_reminder_enabled: boolean | null
+  block_reminder_days: number | null
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -319,51 +323,6 @@ function PillGroup<T extends string>({
         </button>
       ))}
     </div>
-  )
-}
-
-function RadioCard({
-  label,
-  desc,
-  selected,
-  onClick,
-  recommended,
-}: {
-  label: string
-  desc: string
-  selected: boolean
-  onClick: () => void
-  recommended?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`w-full text-left p-3.5 rounded-[10px] border-[1.5px] transition-all duration-150 ${
-        selected
-          ? 'border-[#3b5bdb] bg-[#edf2ff]'
-          : 'border-[#dee2e6] bg-white hover:border-[#748ffc] hover:bg-[#f8f9ff]'
-      }`}
-    >
-      <div className="flex items-start gap-2.5">
-        <div
-          className={`mt-0.5 w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
-            selected ? 'border-[#3b5bdb]' : 'border-[#ced4da]'
-          }`}
-        >
-          {selected && <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />}
-        </div>
-        <div>
-          <span className="text-sm font-semibold text-[#1a1a2e]">{label}</span>
-          {recommended && (
-            <span className="ml-2 text-[0.6rem] font-bold text-[#3b5bdb] bg-[#dbe4ff] px-1.5 py-0.5 rounded-full">
-              Recommended
-            </span>
-          )}
-          <p className="text-xs text-[#6c757d] mt-0.5 leading-relaxed">{desc}</p>
-        </div>
-      </div>
-    </button>
   )
 }
 
@@ -1558,6 +1517,9 @@ export default function SettingsPage() {
   const [monthlyDueDate, setMonthlyDueDate] = useState<'5' | '10' | '15' | '20' | '25' | '28'>('5')
   const [gracePeriod, setGracePeriod] = useState<'3' | '5' | '7'>('5')
   const [autoNotify, setAutoNotify] = useState(true)
+  // Q4 — escalation ("blocking nudge") preference, independent of autoNotify.
+  const [blockReminderEnabled, setBlockReminderEnabled] = useState(true)
+  const [blockReminderDays, setBlockReminderDays] = useState('7')
   const [paymentsLoading, setPaymentsLoading] = useState(false)
   const [paymentsSaved, setPaymentsSaved] = useState(false)
   const [paymentsError, setPaymentsError] = useState('')
@@ -1566,10 +1528,15 @@ export default function SettingsPage() {
   const [waNumber, setWaNumber] = useState('')
   const [waCountry, setWaCountry] = useState(DEFAULT_COUNTRY.code)
   const [waPhoneError, setWaPhoneError] = useState('')
-  const [rescheduleOpt, setRescheduleOpt] = useState<RescheduleOption>('auto_24h')
-  const [rescheduleCustom, setRescheduleCustom] = useState('')
-  const [noshowOpt, setNoshowOpt] = useState<NoshowOption>('forfeit')
-  const [noshowCustom, setNoshowCustom] = useState('')
+  const [teachingStyle, setTeachingStyle] = useState<'individual' | 'group' | 'both'>('individual')
+  const [reschedulePolicyIndividual, setReschedulePolicyIndividual] = useState('')
+  const [reschedulePolicyGroup,      setReschedulePolicyGroup     ] = useState('')
+  const [noshowPolicyIndividual,     setNoshowPolicyIndividual    ] = useState('')
+  const [noshowPolicyGroup,          setNoshowPolicyGroup         ] = useState('')
+  // One-time hint: true when the tutor's split fields were just backfilled
+  // from a single pre-migration policy (both individual/group show the same
+  // text on first load) — set once loaded data is compared, not persisted.
+  const [showPolicySplitHint, setShowPolicySplitHint] = useState(false)
   const [prefsLoading, setPrefsLoading] = useState(false)
   const [prefsSaved, setPrefsSaved] = useState(false)
   const [prefsError, setPrefsError] = useState('')
@@ -1607,7 +1574,7 @@ export default function SettingsPage() {
 
       const { data } = await supabase
         .from('tutors')
-        .select('id, name, phone, email, whatsapp_number, subjects, reschedule_policy, noshow_policy, monthly_due_date, grace_period_days, payment_instructions, notification_prefs, auto_notify_overdue, manual_mode_hint_seen')
+        .select('id, name, phone, email, whatsapp_number, subjects, teaching_style, reschedule_policy_individual, reschedule_policy_group, noshow_policy_individual, noshow_policy_group, monthly_due_date, grace_period_days, payment_instructions, notification_prefs, auto_notify_overdue, manual_mode_hint_seen, block_reminder_enabled, block_reminder_days')
         .eq('id', user.id)
         .single()
 
@@ -1679,6 +1646,8 @@ export default function SettingsPage() {
       }
       setGracePeriod((String(row.grace_period_days ?? 5) as '3' | '5' | '7'))
       setAutoNotify(row.auto_notify_overdue ?? true)
+      setBlockReminderEnabled(row.block_reminder_enabled ?? true)
+      setBlockReminderDays(String(row.block_reminder_days ?? 7))
 
       // Preferences — WhatsApp number
       if (row.whatsapp_number) {
@@ -1692,27 +1661,26 @@ export default function SettingsPage() {
         }
       }
 
-      // Preferences — Reschedule policy
-      if (row.reschedule_policy) {
-        const p = row.reschedule_policy
-        if (p === 'none' || p === 'auto_24h' || p === 'auto_48h') {
-          setRescheduleOpt(p)
-        } else {
-          setRescheduleOpt('custom')
-          setRescheduleCustom(p)
-        }
+      // Preferences — teaching style (controls which policy boxes show)
+      if (row.teaching_style === 'individual' || row.teaching_style === 'group' || row.teaching_style === 'both') {
+        setTeachingStyle(row.teaching_style)
       }
 
-      // Preferences — No-show policy
-      if (row.noshow_policy) {
-        const p = row.noshow_policy
-        if (p === 'forfeit' || p === 'reschedule') {
-          setNoshowOpt(p as NoshowOption)
-        } else {
-          setNoshowOpt('custom')
-          setNoshowCustom(p)
-        }
-      }
+      // Preferences — Reschedule / no-show policy, split by class type
+      setReschedulePolicyIndividual(row.reschedule_policy_individual ?? '')
+      setReschedulePolicyGroup(row.reschedule_policy_group ?? '')
+      setNoshowPolicyIndividual(row.noshow_policy_individual ?? '')
+      setNoshowPolicyGroup(row.noshow_policy_group ?? '')
+
+      // If individual and group text are identical and non-empty, this tutor
+      // most likely still has the migration's backfilled value in both boxes
+      // (see supabase/migrations/20260916_split_reschedule_noshow_policy.sql)
+      // rather than having deliberately written the same policy twice.
+      const rescheduleStillMatches = !!row.reschedule_policy_individual &&
+        row.reschedule_policy_individual === row.reschedule_policy_group
+      const noshowStillMatches = !!row.noshow_policy_individual &&
+        row.noshow_policy_individual === row.noshow_policy_group
+      setShowPolicySplitHint(rescheduleStillMatches || noshowStillMatches)
 
       // Preferences — Notifications
       const prefs = row.notification_prefs ?? {}
@@ -2129,6 +2097,8 @@ export default function SettingsPage() {
       monthly_due_date: Number(monthlyDueDate),
       grace_period_days: Number(gracePeriod),
       auto_notify_overdue: autoNotify,
+      block_reminder_enabled: blockReminderEnabled,
+      block_reminder_days: blockReminderEnabled ? Number(blockReminderDays) : null,
       ...(switchingToManual && { manual_mode_hint_seen: false }),
     })
     setPaymentsLoading(false)
@@ -2139,6 +2109,8 @@ export default function SettingsPage() {
       monthly_due_date: Number(monthlyDueDate),
       grace_period_days: Number(gracePeriod),
       auto_notify_overdue: autoNotify,
+      block_reminder_enabled: blockReminderEnabled,
+      block_reminder_days: blockReminderEnabled ? Number(blockReminderDays) : null,
       ...(switchingToManual && { manual_mode_hint_seen: false }),
     } : prev)
     setPaymentsEditing(false)
@@ -2154,6 +2126,8 @@ export default function SettingsPage() {
     }
     setGracePeriod(String(tutor?.grace_period_days ?? 5) as '3' | '5' | '7')
     setAutoNotify(tutor?.auto_notify_overdue ?? true)
+    setBlockReminderEnabled(tutor?.block_reminder_enabled ?? true)
+    setBlockReminderDays(String(tutor?.block_reminder_days ?? 7))
     setPaymentsError('')
     setPaymentsEditing(false)
   }
@@ -2168,27 +2142,50 @@ export default function SettingsPage() {
       const err = validatePhone(waNumber, country)
       if (err) { setWaPhoneError(err); return }
     }
-    if (rescheduleOpt === 'custom' && !rescheduleCustom.trim()) {
-      setPrefsError('Please enter your custom reschedule policy.')
+    const showIndividual = teachingStyle === 'individual' || teachingStyle === 'both'
+    const showGroup      = teachingStyle === 'group' || teachingStyle === 'both'
+    if (showIndividual && !reschedulePolicyIndividual.trim()) {
+      setPrefsError('Please enter your reschedule policy for individual classes.')
       return
     }
-    if (noshowOpt === 'custom' && !noshowCustom.trim()) {
-      setPrefsError('Please enter your custom no-show policy.')
+    if (showGroup && !reschedulePolicyGroup.trim()) {
+      setPrefsError('Please enter your reschedule policy for batch classes.')
+      return
+    }
+    if (showIndividual && !noshowPolicyIndividual.trim()) {
+      setPrefsError('Please enter your no-show policy for individual classes.')
+      return
+    }
+    if (showGroup && !noshowPolicyGroup.trim()) {
+      setPrefsError('Please enter your no-show policy for batch classes.')
       return
     }
     setPrefsLoading(true)
     const fullPhone = waNumber ? `${country.dialCode}${waNumber}` : null
-    const reschedulePolicyValue = rescheduleOpt === 'custom' ? rescheduleCustom.trim() : rescheduleOpt
-    const noshowPolicyValue = noshowOpt === 'custom' ? noshowCustom.trim() : noshowOpt
+    const reschedulePolicyIndividualValue = reschedulePolicyIndividual.trim()
+    const reschedulePolicyGroupValue      = reschedulePolicyGroup.trim()
+    const noshowPolicyIndividualValue     = noshowPolicyIndividual.trim()
+    const noshowPolicyGroupValue          = noshowPolicyGroup.trim()
     const ok = await updateTutor({
       whatsapp_number: fullPhone,
-      reschedule_policy: reschedulePolicyValue,
-      noshow_policy: noshowPolicyValue,
+      reschedule_policy_individual: reschedulePolicyIndividualValue,
+      reschedule_policy_group:      reschedulePolicyGroupValue,
+      noshow_policy_individual:     noshowPolicyIndividualValue,
+      noshow_policy_group:          noshowPolicyGroupValue,
       notification_prefs: { events: notifPrefs },
     })
     setPrefsLoading(false)
     if (!ok) { setPrefsError('Could not save. Please try again.'); return }
-    setTutor(prev => prev ? { ...prev, whatsapp_number: fullPhone, reschedule_policy: reschedulePolicyValue, noshow_policy: noshowPolicyValue, notification_prefs: { events: notifPrefs } } : prev)
+    setTutor(prev => prev ? {
+      ...prev,
+      whatsapp_number: fullPhone,
+      reschedule_policy_individual: reschedulePolicyIndividualValue,
+      reschedule_policy_group:      reschedulePolicyGroupValue,
+      noshow_policy_individual:     noshowPolicyIndividualValue,
+      noshow_policy_group:          noshowPolicyGroupValue,
+      notification_prefs: { events: notifPrefs },
+    } : prev)
+    setShowPolicySplitHint(false)
     setPrefsEditing(false)
     flashSaved(setPrefsSaved)
   }
@@ -2201,16 +2198,10 @@ export default function SettingsPage() {
       if (country) { setWaCountry(country.code); setWaNumber(raw.slice(country.dialCode.replace('+', '').length)) }
       else setWaNumber(raw)
     } else { setWaNumber(''); setWaCountry(DEFAULT_COUNTRY.code) }
-    if (row?.reschedule_policy) {
-      const p = row.reschedule_policy
-      if (p === 'none' || p === 'auto_24h' || p === 'auto_48h') { setRescheduleOpt(p); setRescheduleCustom('') }
-      else { setRescheduleOpt('custom'); setRescheduleCustom(p) }
-    } else { setRescheduleOpt('auto_24h'); setRescheduleCustom('') }
-    if (row?.noshow_policy) {
-      const p = row.noshow_policy
-      if (p === 'forfeit' || p === 'reschedule') { setNoshowOpt(p as NoshowOption); setNoshowCustom('') }
-      else { setNoshowOpt('custom'); setNoshowCustom(p) }
-    } else { setNoshowOpt('forfeit'); setNoshowCustom('') }
+    setReschedulePolicyIndividual(row?.reschedule_policy_individual ?? '')
+    setReschedulePolicyGroup(row?.reschedule_policy_group ?? '')
+    setNoshowPolicyIndividual(row?.noshow_policy_individual ?? '')
+    setNoshowPolicyGroup(row?.noshow_policy_group ?? '')
     setNotifPrefs(makeNotifPrefs(row?.notification_prefs?.events))
     setWaPhoneError('')
     setPrefsError('')
@@ -2726,6 +2717,12 @@ export default function SettingsPage() {
                       <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">Payment reminders</dt>
                       <dd className="text-sm font-medium text-[#1a1a2e]">{autoNotify ? 'Sent automatically' : 'Manual — notify me only'}</dd>
                     </div>
+                    <div>
+                      <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">Urgent flag</dt>
+                      <dd className="text-sm font-medium text-[#1a1a2e]">
+                        {blockReminderEnabled ? `After ${blockReminderDays} days overdue` : 'Off'}
+                      </dd>
+                    </div>
                   </div>
                   {paymentsSaved && <SavedToast visible />}
                 </dl>
@@ -2759,9 +2756,11 @@ export default function SettingsPage() {
                       <div className="w-6 h-6 rounded-[6px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0">
                         <Calendar size={12} className="text-white" />
                       </div>
-                      <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">Monthly Due Date</h3>
+                      <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">
+                        <span className="text-[#748ffc] mr-1.5">Q1</span>When are monthly payments due?
+                      </h3>
                     </div>
-                    <p className="text-[#6c757d] text-xs mb-2">Day of the month fees are due. Students will be reminded automatically.</p>
+                    <p className="text-[#6c757d] text-xs mb-2">Day of the month fees are due.</p>
                     <div className="flex flex-wrap gap-2">
                       {(['5', '10', '15', '20', '25', '28'] as const).map(d => (
                         <button
@@ -2786,9 +2785,10 @@ export default function SettingsPage() {
                       <div className="w-6 h-6 rounded-[6px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0">
                         <AlertTriangle size={12} className="text-white" />
                       </div>
-                      <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">Grace Period Before Access is Blocked</h3>
+                      <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">
+                        <span className="text-[#748ffc] mr-1.5">Q2</span>Days after due date before marked overdue?
+                      </h3>
                     </div>
-                    <p className="text-[#6c757d] text-xs mb-3">After this many days overdue, Zoom links stop being sent to the student.</p>
                     <div className="space-y-2">
                       {([
                         { value: '3' as const, label: '3 days', sublabel: 'Quick — good for strict payment discipline' },
@@ -2810,6 +2810,12 @@ export default function SettingsPage() {
                         </button>
                       ))}
                     </div>
+                    <div className="mt-2 flex items-start gap-2 bg-[#edf2ff] border border-[#dbe4ff] rounded-[10px] px-3 py-2.5">
+                      <span className="text-sm flex-shrink-0 leading-none mt-0.5">💡</span>
+                      <p className="text-[#3b5bdb] text-xs leading-relaxed">
+                        This only changes when a payment shows as overdue on your dashboard — it never blocks anyone automatically.
+                      </p>
+                    </div>
                   </div>
 
                   {/* Payment reminders — auto-notify consent */}
@@ -2818,7 +2824,9 @@ export default function SettingsPage() {
                       <div className="w-6 h-6 rounded-[6px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0">
                         <Bell size={12} className="text-white" />
                       </div>
-                      <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">Payment Reminders</h3>
+                      <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">
+                        <span className="text-[#748ffc] mr-1.5">Q3</span>Remind students automatically, or just tell you?
+                      </h3>
                     </div>
                     <p className="text-[#6c757d] text-xs mb-3">
                       This applies to all reminder stages — 3-day-before, due date, and overdue.
@@ -2839,7 +2847,7 @@ export default function SettingsPage() {
                           </div>
                           <div>
                             <p className={`text-sm font-semibold leading-none mb-0.5 ${autoNotify ? 'text-[#3b5bdb]' : 'text-[#1a1a2e]'}`}>Yes, send automatically</p>
-                            <p className="text-xs text-[#6c757d] mt-0.5">We&apos;ll message students for you at 3 days before, on the due date, and if payment is overdue.</p>
+                            <p className="text-xs text-[#6c757d] mt-0.5">We&apos;ll message students 3 days before it&apos;s due, on the due date, and once if it becomes overdue.</p>
                           </div>
                         </div>
                       </button>
@@ -2862,6 +2870,85 @@ export default function SettingsPage() {
                           </div>
                         </div>
                       </button>
+                    </div>
+                  </div>
+
+                  {/* Q4 — escalation ("blocking nudge") preference */}
+                  <div>
+                    <div className="flex items-center gap-2 mb-2 pb-1.5 border-b border-[#f1f3f5]">
+                      <div className="w-6 h-6 rounded-[6px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0">
+                        <Flag size={12} className="text-white" />
+                      </div>
+                      <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">
+                        <span className="text-[#748ffc] mr-1.5">Q4</span>Flag long-overdue payments more urgently?
+                      </h3>
+                    </div>
+                    <p className="text-[#6c757d] text-xs mb-3">
+                      If a payment stays overdue a long time, want it flagged more urgently so you remember to act?
+                    </p>
+                    <div className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setBlockReminderEnabled(true)}
+                        className={`w-full text-left rounded-[12px] border px-4 py-3 transition-all duration-150 ${
+                          blockReminderEnabled
+                            ? 'border-[#3b5bdb] bg-[#edf2ff] shadow-[0_0_0_1px_#3b5bdb]'
+                            : 'border-[#dee2e6] bg-white hover:border-[#3b5bdb] hover:bg-[#f8f9ff]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-all ${blockReminderEnabled ? 'border-[#3b5bdb]' : 'border-[#ced4da]'}`}>
+                            {blockReminderEnabled && <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />}
+                          </div>
+                          <p className={`text-sm font-semibold leading-none ${blockReminderEnabled ? 'text-[#3b5bdb]' : 'text-[#1a1a2e]'}`}>
+                            Yes — flag it after a set number of days overdue
+                          </p>
+                        </div>
+                      </button>
+
+                      {blockReminderEnabled && (
+                        <div className="pl-7 flex flex-wrap gap-2">
+                          {(['3', '5', '7', '10', '14'] as const).map(d => (
+                            <button
+                              key={d}
+                              type="button"
+                              onClick={() => setBlockReminderDays(d)}
+                              className={`px-3.5 py-1.5 rounded-full text-xs font-bold border transition-all duration-150 ${
+                                blockReminderDays === d
+                                  ? 'bg-[#3b5bdb] text-white border-[#3b5bdb] shadow-[0_2px_8px_rgba(59,91,219,0.2)]'
+                                  : 'bg-white text-[#6c757d] border-[#ced4da] hover:border-[#3b5bdb] hover:text-[#3b5bdb]'
+                              }`}
+                            >
+                              {d} days
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => setBlockReminderEnabled(false)}
+                        className={`w-full text-left rounded-[12px] border px-4 py-3 transition-all duration-150 ${
+                          !blockReminderEnabled
+                            ? 'border-[#3b5bdb] bg-[#edf2ff] shadow-[0_0_0_1px_#3b5bdb]'
+                            : 'border-[#dee2e6] bg-white hover:border-[#3b5bdb] hover:bg-[#f8f9ff]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-all ${!blockReminderEnabled ? 'border-[#3b5bdb]' : 'border-[#ced4da]'}`}>
+                            {!blockReminderEnabled && <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />}
+                          </div>
+                          <p className={`text-sm font-semibold leading-none ${!blockReminderEnabled ? 'text-[#3b5bdb]' : 'text-[#1a1a2e]'}`}>
+                            No — just show it as overdue
+                          </p>
+                        </div>
+                      </button>
+                    </div>
+                    <div className="mt-2 flex items-start gap-2 bg-[#edf2ff] border border-[#dbe4ff] rounded-[10px] px-3 py-2.5">
+                      <span className="text-sm flex-shrink-0 leading-none mt-0.5">💡</span>
+                      <p className="text-[#3b5bdb] text-xs leading-relaxed">
+                        We&apos;ll never block a student automatically — you always click [Block student] yourself. This only makes the reminder louder.
+                      </p>
                     </div>
                   </div>
 
@@ -2904,24 +2991,47 @@ export default function SettingsPage() {
                       {waNumber ? `${findCountry(waCountry).dialCode} ${waNumber}` : <span className="text-[#adb5bd]">—</span>}
                     </dd>
                   </div>
-                  <div className="flex gap-8 flex-wrap">
-                    <div>
-                      <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">Reschedule policy</dt>
-                      <dd className="text-sm font-medium text-[#1a1a2e]">
-                        {rescheduleOpt === 'none' ? 'No rescheduling allowed'
-                          : rescheduleOpt === 'auto_24h' ? '24 hours notice required'
-                          : rescheduleOpt === 'auto_48h' ? '48 hours notice required'
-                          : 'Custom policy'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">No-show policy</dt>
-                      <dd className="text-sm font-medium text-[#1a1a2e]">
-                        {noshowOpt === 'forfeit' ? 'Class is forfeited'
-                          : noshowOpt === 'reschedule' ? 'One makeup class allowed per month'
-                          : 'Custom policy'}
-                      </dd>
-                    </div>
+                  <div className="space-y-3">
+                    {(teachingStyle === 'individual' || teachingStyle === 'both') && (
+                      <div>
+                        <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">Reschedule policy — Individual</dt>
+                        <dd className="text-sm font-medium text-[#1a1a2e]">
+                          {reschedulePolicyIndividual
+                            ? (reschedulePolicyIndividual.length > 120 ? reschedulePolicyIndividual.slice(0, 120) + '…' : reschedulePolicyIndividual)
+                            : <span className="text-[#adb5bd]">Not set</span>}
+                        </dd>
+                      </div>
+                    )}
+                    {(teachingStyle === 'group' || teachingStyle === 'both') && (
+                      <div>
+                        <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">Reschedule policy — Batch</dt>
+                        <dd className="text-sm font-medium text-[#1a1a2e]">
+                          {reschedulePolicyGroup
+                            ? (reschedulePolicyGroup.length > 120 ? reschedulePolicyGroup.slice(0, 120) + '…' : reschedulePolicyGroup)
+                            : <span className="text-[#adb5bd]">Not set</span>}
+                        </dd>
+                      </div>
+                    )}
+                    {(teachingStyle === 'individual' || teachingStyle === 'both') && (
+                      <div>
+                        <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">No-show policy — Individual</dt>
+                        <dd className="text-sm font-medium text-[#1a1a2e]">
+                          {noshowPolicyIndividual
+                            ? (noshowPolicyIndividual.length > 120 ? noshowPolicyIndividual.slice(0, 120) + '…' : noshowPolicyIndividual)
+                            : <span className="text-[#adb5bd]">Not set</span>}
+                        </dd>
+                      </div>
+                    )}
+                    {(teachingStyle === 'group' || teachingStyle === 'both') && (
+                      <div>
+                        <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">No-show policy — Batch</dt>
+                        <dd className="text-sm font-medium text-[#1a1a2e]">
+                          {noshowPolicyGroup
+                            ? (noshowPolicyGroup.length > 120 ? noshowPolicyGroup.slice(0, 120) + '…' : noshowPolicyGroup)
+                            : <span className="text-[#adb5bd]">Not set</span>}
+                        </dd>
+                      </div>
+                    )}
                   </div>
                   <div>
                     <dt className="text-[0.68rem] font-semibold text-[#adb5bd] uppercase tracking-wide mb-0.5">Notifications</dt>
@@ -2965,6 +3075,16 @@ export default function SettingsPage() {
                     {waPhoneError && <p className="mt-1.5 text-[#c92a2a] text-xs">{waPhoneError}</p>}
                   </div>
 
+                  {showPolicySplitHint && (
+                    <div className="flex items-start gap-2 bg-[#edf2ff] border border-[#dbe4ff] rounded-[10px] px-3 py-2.5">
+                      <span className="text-sm flex-shrink-0 leading-none mt-0.5">💡</span>
+                      <p className="text-[#3b5bdb] text-xs leading-relaxed">
+                        We&apos;ve split your policy into Individual and Batch versions — both
+                        currently show your previous combined policy. Feel free to make them different.
+                      </p>
+                    </div>
+                  )}
+
                   {/* Reschedule policy */}
                   <div>
                     <div className="flex items-center gap-2 mb-3 pb-2 border-b border-[#f1f3f5]">
@@ -2973,40 +3093,32 @@ export default function SettingsPage() {
                       </div>
                       <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">Reschedule Policy</h3>
                     </div>
-                    <p className="text-[#6c757d] text-xs mb-3">This is shared with students when they book. What&apos;s your reschedule policy?</p>
-                    <div className="space-y-2">
-                      <RadioCard
-                        label="No rescheduling allowed"
-                        desc="Classes cannot be rescheduled once booked"
-                        selected={rescheduleOpt === 'none'}
-                        onClick={() => setRescheduleOpt('none')}
-                      />
-                      <RadioCard
-                        label="24 hours notice required"
-                        desc="Students can reschedule if they give at least 24 hours notice"
-                        selected={rescheduleOpt === 'auto_24h'}
-                        onClick={() => setRescheduleOpt('auto_24h')}
-                        recommended
-                      />
-                      <RadioCard
-                        label="48 hours notice required"
-                        desc="Stricter — 2 day advance notice required to reschedule"
-                        selected={rescheduleOpt === 'auto_48h'}
-                        onClick={() => setRescheduleOpt('auto_48h')}
-                      />
-                      <RadioCard
-                        label="Custom policy"
-                        desc="Write your own reschedule rules"
-                        selected={rescheduleOpt === 'custom'}
-                        onClick={() => setRescheduleOpt('custom')}
-                      />
-                    </div>
-                    {rescheduleOpt === 'custom' && (
-                      <div className="mt-3">
+                    <p className="text-[#6c757d] text-xs mb-3">
+                      This is shared with students when they book. Rescheduling is always confirmed
+                      by you manually — there&apos;s no self-service time picker, so write what
+                      actually happens when a student asks.
+                    </p>
+
+                    {(teachingStyle === 'individual' || teachingStyle === 'both') && (
+                      <div className="mb-4">
+                        <label className="block text-[#343a40] text-xs font-bold mb-1.5">Individual classes</label>
                         <textarea
-                          placeholder="e.g. Students must request reschedule at least 24 hours before the class and it will be reviewed case by case."
-                          value={rescheduleCustom}
-                          onChange={e => { setRescheduleCustom(e.target.value); setPrefsError('') }}
+                          placeholder="e.g. Message at least 24 hours before your class to request a reschedule. I'll confirm a new time within 24 hours based on my availability that week."
+                          value={reschedulePolicyIndividual}
+                          onChange={e => { setReschedulePolicyIndividual(e.target.value); setPrefsError('') }}
+                          rows={3}
+                          className="w-full border border-[#ced4da] rounded-[10px] px-3 py-[9px] text-sm text-[#1a1a2e] placeholder:text-[#adb5bd] outline-none transition-all resize-none focus:border-[#3b5bdb] focus:ring-[3px] focus:ring-[rgba(59,91,219,0.12)]"
+                        />
+                      </div>
+                    )}
+
+                    {(teachingStyle === 'group' || teachingStyle === 'both') && (
+                      <div>
+                        <label className="block text-[#343a40] text-xs font-bold mb-1.5">Batch classes</label>
+                        <textarea
+                          placeholder="e.g. Batch classes can't be rescheduled individually — if you miss one, join the next session as a catch-up."
+                          value={reschedulePolicyGroup}
+                          onChange={e => { setReschedulePolicyGroup(e.target.value); setPrefsError('') }}
                           rows={3}
                           className="w-full border border-[#ced4da] rounded-[10px] px-3 py-[9px] text-sm text-[#1a1a2e] placeholder:text-[#adb5bd] outline-none transition-all resize-none focus:border-[#3b5bdb] focus:ring-[3px] focus:ring-[rgba(59,91,219,0.12)]"
                         />
@@ -3023,32 +3135,27 @@ export default function SettingsPage() {
                       <h3 className="text-xs font-bold text-[#1a1a2e] font-mono uppercase tracking-widest">No-show Policy</h3>
                     </div>
                     <p className="text-[#6c757d] text-xs mb-3">What happens if a student misses a class without notice?</p>
-                    <div className="space-y-2">
-                      <RadioCard
-                        label="Class is forfeited"
-                        desc="Unattended sessions count as used — no refund or makeup class"
-                        selected={noshowOpt === 'forfeit'}
-                        onClick={() => setNoshowOpt('forfeit')}
-                      />
-                      <RadioCard
-                        label="One makeup class allowed per month"
-                        desc="Automatically offers one makeup slot for no-shows"
-                        selected={noshowOpt === 'reschedule'}
-                        onClick={() => setNoshowOpt('reschedule')}
-                      />
-                      <RadioCard
-                        label="Custom policy"
-                        desc="Write your own no-show rules"
-                        selected={noshowOpt === 'custom'}
-                        onClick={() => setNoshowOpt('custom')}
-                      />
-                    </div>
-                    {noshowOpt === 'custom' && (
-                      <div className="mt-3">
+
+                    {(teachingStyle === 'individual' || teachingStyle === 'both') && (
+                      <div className="mb-4">
+                        <label className="block text-[#343a40] text-xs font-bold mb-1.5">Individual classes</label>
                         <textarea
-                          placeholder="e.g. First no-show per month gets a makeup class. Subsequent no-shows forfeit the session."
-                          value={noshowCustom}
-                          onChange={e => { setNoshowCustom(e.target.value); setPrefsError('') }}
+                          placeholder="e.g. If you don't show up without notice, the class is forfeited — message me to arrange a makeup at my discretion."
+                          value={noshowPolicyIndividual}
+                          onChange={e => { setNoshowPolicyIndividual(e.target.value); setPrefsError('') }}
+                          rows={3}
+                          className="w-full border border-[#ced4da] rounded-[10px] px-3 py-[9px] text-sm text-[#1a1a2e] placeholder:text-[#adb5bd] outline-none transition-all resize-none focus:border-[#3b5bdb] focus:ring-[3px] focus:ring-[rgba(59,91,219,0.12)]"
+                        />
+                      </div>
+                    )}
+
+                    {(teachingStyle === 'group' || teachingStyle === 'both') && (
+                      <div>
+                        <label className="block text-[#343a40] text-xs font-bold mb-1.5">Batch classes</label>
+                        <textarea
+                          placeholder="e.g. Group sessions can't be rescheduled for a single no-show — the next session is your catch-up."
+                          value={noshowPolicyGroup}
+                          onChange={e => { setNoshowPolicyGroup(e.target.value); setPrefsError('') }}
                           rows={3}
                           className="w-full border border-[#ced4da] rounded-[10px] px-3 py-[9px] text-sm text-[#1a1a2e] placeholder:text-[#adb5bd] outline-none transition-all resize-none focus:border-[#3b5bdb] focus:ring-[3px] focus:ring-[rgba(59,91,219,0.12)]"
                         />

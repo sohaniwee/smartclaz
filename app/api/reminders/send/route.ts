@@ -24,7 +24,8 @@ import {
 } from '@/lib/twilio'
 import { createBatchZoomMeeting } from '@/lib/zoom'
 import { generateBatchSessions } from '@/lib/sessions/generate-batch-sessions'
-import { computeOverdueStatus } from '@/lib/payment-status'
+import { generateIndividualSessions } from '@/lib/sessions/generate-individual-sessions'
+import { computeOverdueStatus, computeEscalationStatus } from '@/lib/payment-status'
 
 // ── Service role Supabase client ─────────────────────────────────────────────
 function getServiceSupabase() {
@@ -98,6 +99,7 @@ export async function GET(req: NextRequest) {
     paymentsNewlyOverdue:   0,
     overdueRemindersSent:   0,
     tutorSummariesSent:     0,
+    escalationPingsSent:    0,
     studentsBlocked:        0, // always 0 — blocking is manual-only, cron never sets this
     batchLinksRefreshed:    0,
     errors:                 [] as string[],
@@ -285,11 +287,13 @@ export async function GET(req: NextRequest) {
       phone: string | null
       payment_instructions: string | null
       auto_notify_overdue: boolean | null
+      block_reminder_enabled: boolean | null
+      block_reminder_days: number | null
     }
 
     const { data: tutors, error: tutorsErr } = await supabase
       .from('tutors')
-      .select('id, monthly_due_date, grace_period_days, whatsapp_number, phone, payment_instructions, auto_notify_overdue')
+      .select('id, monthly_due_date, grace_period_days, whatsapp_number, phone, payment_instructions, auto_notify_overdue, block_reminder_enabled, block_reminder_days')
 
     if (tutorsErr) throw tutorsErr
 
@@ -298,10 +302,12 @@ export async function GET(req: NextRequest) {
 
     for (const tutor of (tutors ?? []) as TutorRow[]) {
       try {
-        const monthlyDueDate  = tutor.monthly_due_date  ?? 28
-        const gracePeriodDays = tutor.grace_period_days ?? 3
-        const tutorPhone      = tutor.whatsapp_number ?? tutor.phone ?? ''
-        const autoNotify      = tutor.auto_notify_overdue ?? true
+        const monthlyDueDate      = tutor.monthly_due_date  ?? 28
+        const gracePeriodDays     = tutor.grace_period_days ?? 3
+        const tutorPhone          = tutor.whatsapp_number ?? tutor.phone ?? ''
+        const autoNotify          = tutor.auto_notify_overdue ?? true
+        const blockReminderEnabled = tutor.block_reminder_enabled ?? true
+        const blockReminderDays    = tutor.block_reminder_days ?? null
 
         type StudentRel = { id: string; name: string; whatsapp: string; parent_whatsapp: string | null }
 
@@ -316,12 +322,13 @@ export async function GET(req: NextRequest) {
           reminder_overdue_sent: boolean | null
           tutor_notified_3day: boolean | null
           tutor_notified_due: boolean | null
+          escalation_notified: boolean | null
           students: StudentRel | StudentRel[] | null
         }
 
         const { data: pendingPayments, error: paymentsErr } = await supabase
           .from('payments')
-          .select('id, amount_lkr, month_year, status, is_trial_payment, reminder_3day_sent, reminder_due_sent, reminder_overdue_sent, tutor_notified_3day, tutor_notified_due, students(id, name, whatsapp, parent_whatsapp)')
+          .select('id, amount_lkr, month_year, status, is_trial_payment, reminder_3day_sent, reminder_due_sent, reminder_overdue_sent, tutor_notified_3day, tutor_notified_due, escalation_notified, students(id, name, whatsapp, parent_whatsapp)')
           .eq('tutor_id', tutor.id)
           .in('status', ['pending', 'overdue'])
 
@@ -330,6 +337,12 @@ export async function GET(req: NextRequest) {
         const threeDayReminders: RawPending[] = []
         const dueDateReminders:  RawPending[] = []
         const newlyOverdue:      RawPending[] = []
+        // One-time escalation ping — distinct from the regular batched
+        // summary below. Fires exactly once per payment (escalation_notified
+        // flips to true immediately), regardless of how many times this
+        // cron runs afterward. Independent of autoNotify: that setting only
+        // controls messages to STUDENTS, this is always tutor-facing.
+        const newlyEscalated: Array<RawPending & { studentName: string; daysOverdue: number }> = []
 
         for (const raw of (pendingPayments ?? []) as unknown as RawPending[]) {
           const student = Array.isArray(raw.students) ? raw.students[0] : raw.students
@@ -338,6 +351,19 @@ export async function GET(req: NextRequest) {
           const { isOverdue, daysOverdue, dueDate } = computeOverdueStatus(
             monthlyDueDate, gracePeriodDays, raw.month_year, raw.status,
           )
+
+          const { isEscalated } = computeEscalationStatus(daysOverdue, blockReminderEnabled, blockReminderDays)
+          if (isEscalated && !raw.escalation_notified) {
+            try {
+              const { error: escalationFlagErr } = await supabase.from('payments')
+                .update({ escalation_notified: true })
+                .eq('id', raw.id)
+              if (escalationFlagErr) throw escalationFlagErr
+              newlyEscalated.push({ ...raw, studentName: student.name, daysOverdue })
+            } catch (err) {
+              results.errors.push(`escalation flag ${raw.id}: ${String(err)}`)
+            }
+          }
 
           const recipientPhone = student.whatsapp ?? student.parent_whatsapp
           const threeDaysBefore = new Date(dueDate)
@@ -437,6 +463,38 @@ export async function GET(req: NextRequest) {
           }
         }
 
+        // ── One-time escalation pings ──
+        // Sent as their own distinct WhatsApp message — different tone,
+        // different purpose — even if it lands in the same cron run as the
+        // regular batched summary below.
+        for (const escalated of newlyEscalated) {
+          try {
+            await sendTutorWhatsApp(
+              tutorPhone,
+              'Payment needs a decision',
+              `🚨 ${escalated.studentName} just crossed your ${blockReminderDays}-day flag for overdue payments.\n\n` +
+                `LKR ${escalated.amount_lkr.toLocaleString()} · ${escalated.daysOverdue} days overdue\n\n` +
+                `Might be time to decide — remind, mark paid, or block access:\n` +
+                `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://smartclaz.com'}/payments`,
+              undefined,
+              tutor.id,
+            )
+
+            await supabase.from('notifications').insert({
+              tutor_id:   tutor.id,
+              type:       'payment_escalation',
+              title:      `${escalated.studentName} needs a decision`,
+              body:       `${escalated.daysOverdue} days overdue — past your ${blockReminderDays}-day flag`,
+              action_url: '/payments',
+              read:       false,
+            })
+
+            results.escalationPingsSent++
+          } catch (err) {
+            results.errors.push(`escalation ping ${escalated.id}: ${String(err)}`)
+          }
+        }
+
         // ── Batched tutor notification ──
         const parts: string[] = []
 
@@ -449,18 +507,25 @@ export async function GET(req: NextRequest) {
           }
         }
 
-        if (newlyOverdue.length > 0) {
-          const names = newlyOverdue
+        // Exclude anything that already got its own escalation ping above —
+        // the escalation ping takes priority as the stronger signal, so the
+        // same payment shouldn't also show up in the regular summary.
+        const newlyOverdueForSummary = newlyOverdue.filter(
+          p => !newlyEscalated.some(e => e.id === p.id),
+        )
+
+        if (newlyOverdueForSummary.length > 0) {
+          const names = newlyOverdueForSummary
             .map(p => (Array.isArray(p.students) ? p.students[0] : p.students)?.name)
             .filter(Boolean)
             .slice(0, 3)
             .join(', ')
-          const extra = newlyOverdue.length > 3 ? ` and ${newlyOverdue.length - 3} more` : ''
+          const extra = newlyOverdueForSummary.length > 3 ? ` and ${newlyOverdueForSummary.length - 3} more` : ''
 
           parts.push(
             autoNotify
-              ? `${newlyOverdue.length} student${newlyOverdue.length > 1 ? 's' : ''} now overdue — reminder sent automatically (${names}${extra})`
-              : `${newlyOverdue.length} student${newlyOverdue.length > 1 ? 's are' : ' is'} now overdue: ${names}${extra}`,
+              ? `${newlyOverdueForSummary.length} student${newlyOverdueForSummary.length > 1 ? 's' : ''} now overdue — reminder sent automatically (${names}${extra})`
+              : `${newlyOverdueForSummary.length} student${newlyOverdueForSummary.length > 1 ? 's are' : ' is'} now overdue: ${names}${extra}`,
           )
         }
 
@@ -654,6 +719,11 @@ export async function GET(req: NextRequest) {
       } catch (e) {
         console.error(`[reminders] batch session generation error for tutor ${tutor.id}:`, e)
       }
+      try {
+        await generateIndividualSessions(tutor.id, supabase)
+      } catch (e) {
+        console.error(`[reminders] individual session generation error for tutor ${tutor.id}:`, e)
+      }
     }
   } catch (e) {
     console.error('[reminders] batch session generation error:', e)
@@ -673,6 +743,7 @@ export async function GET(req: NextRequest) {
     paymentsNewlyOverdue:  results.paymentsNewlyOverdue,
     overdueRemindersSent:  results.overdueRemindersSent,
     tutorSummariesSent:    results.tutorSummariesSent,
+    escalationPingsSent:   results.escalationPingsSent,
     studentsBlocked:       results.studentsBlocked, // always 0 — blocking is manual-only
     batchLinksRefreshed:   results.batchLinksRefreshed,
     errors:                results.errors,

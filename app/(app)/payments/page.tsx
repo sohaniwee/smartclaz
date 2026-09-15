@@ -594,7 +594,7 @@ function PaymentsPageInner() {
         student_whatsapp:  s?.whatsapp ?? '',
         subject:           s?.subject ?? '',
         grade:             s?.grade ?? '',
-        class_type:        (s?.class_type ?? 'individual') as 'individual' | 'batch' | 'trial',
+        class_type:        (s?.class_type ?? 'individual') as 'individual' | 'group' | 'trial',
         batch_name:        null, // batch name fetched separately if needed
         amount_lkr:        p.amount_lkr,
         full_fee:          p.full_fee ?? null,

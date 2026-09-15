@@ -11,6 +11,10 @@ export interface OverduePaymentItem {
   studentName: string
   amountLkr: number
   daysOverdue: number
+  // Tutor-controlled "blocking nudge" escalation (see lib/payment-status.ts
+  // computeEscalationStatus) — purely a louder visual treatment. Never
+  // implies the student is or will be blocked; that's always a manual click.
+  isEscalated: boolean
 }
 
 // Embeddable "Overdue payments" group for the Dashboard's At-Risk Students
@@ -21,11 +25,13 @@ export default function OverduePaymentsCard({
   payments,
   totalCount,
   autoNotifyMode,
+  blockReminderDays,
   onChanged,
 }: {
   payments: OverduePaymentItem[]
   totalCount: number
   autoNotifyMode: boolean
+  blockReminderDays?: number | null
   onChanged: () => void
 }) {
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -91,15 +97,31 @@ export default function OverduePaymentsCard({
 
   if (totalCount === 0) return null
 
+  const escalatedCount = payments.filter(p => p.isEscalated).length
+
   return (
     <div className="rounded-[14px] border border-[#f1f3f5] overflow-hidden">
       {/* Group header */}
       <div className="flex items-center gap-2 px-4 py-2.5 bg-[#f8f9fa] border-b border-[#f1f3f5]">
-        <div className="w-5 h-5 rounded-full bg-[#fff9db] border border-[#ffec99] flex items-center justify-center flex-shrink-0">
-          <AlertCircle size={11} className="text-[#e67700]" />
-        </div>
-        <span className="text-[0.72rem] font-bold text-[#343a40]">Overdue payments</span>
-        <span className="text-[0.68rem] text-[#adb5bd] font-medium">· {totalCount} student{totalCount !== 1 ? 's' : ''}</span>
+        {escalatedCount > 0 ? (
+          <>
+            <div className="w-5 h-5 rounded-full bg-[#fff5f5] border border-[#ffc9c9] flex items-center justify-center flex-shrink-0">
+              <span className="text-[0.6rem] leading-none">⚠️</span>
+            </div>
+            <span className="text-[0.72rem] font-bold text-[#c92a2a]">
+              {escalatedCount} student{escalatedCount !== 1 ? 's' : ''} need{escalatedCount === 1 ? 's' : ''} your decision
+            </span>
+            <span className="text-[0.68rem] text-[#adb5bd] font-medium">· {totalCount} overdue total</span>
+          </>
+        ) : (
+          <>
+            <div className="w-5 h-5 rounded-full bg-[#fff9db] border border-[#ffec99] flex items-center justify-center flex-shrink-0">
+              <AlertCircle size={11} className="text-[#e67700]" />
+            </div>
+            <span className="text-[0.72rem] font-bold text-[#343a40]">Overdue payments</span>
+            <span className="text-[0.68rem] text-[#adb5bd] font-medium">· {totalCount} student{totalCount !== 1 ? 's' : ''}</span>
+          </>
+        )}
         <Link href="/payments?tab=overdue" className="ml-auto text-[0.68rem] font-semibold text-[#3b5bdb] hover:text-[#4c6ef5] transition-colors flex-shrink-0">
           View all in Payments →
         </Link>
@@ -118,18 +140,39 @@ export default function OverduePaymentsCard({
       {payments.map(p => {
         const busy = busyId === p.paymentId
         return (
-          <div key={p.paymentId} className="flex items-center gap-3 px-4 py-3 border-b border-[#f8f9fa] last:border-0 hover:bg-[#fffbf5] transition-colors">
+          <div
+            key={p.paymentId}
+            className={
+              p.isEscalated
+                ? 'flex items-center gap-3 px-4 py-3 border-b-2 border-[#c92a2a] last:border-b-0 bg-[#fff5f5]'
+                : 'flex items-center gap-3 px-4 py-3 border-b border-[#f8f9fa] last:border-0 hover:bg-[#fffbf5] transition-colors'
+            }
+          >
             <div className="w-9 h-9 rounded-full bg-[#edf2ff] flex items-center justify-center flex-shrink-0 text-[#3b5bdb] text-[0.75rem] font-extrabold">
               {p.studentName.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-[0.82rem] font-semibold text-[#1a1a2e] truncate">{p.studentName}</p>
-              <p className="text-[0.72rem] text-[#c92a2a] font-semibold mt-0.5">
-                LKR {p.amountLkr.toLocaleString()}
-                <span className="text-[#adb5bd] font-normal ml-1">
-                  · {p.daysOverdue} day{p.daysOverdue !== 1 ? 's' : ''} overdue
-                </span>
-              </p>
+              {p.isEscalated ? (
+                <>
+                  <p className="text-[0.72rem] font-extrabold text-[#c92a2a] mt-0.5">
+                    🚨 Seriously overdue ({p.daysOverdue} days)
+                  </p>
+                  <p className="text-[0.68rem] text-[#c92a2a] mt-0.5">
+                    LKR {p.amountLkr.toLocaleString()}
+                    {typeof blockReminderDays === 'number' && (
+                      <span> · Past your {blockReminderDays}-day flag threshold</span>
+                    )}
+                  </p>
+                </>
+              ) : (
+                <p className="text-[0.72rem] text-[#c92a2a] font-semibold mt-0.5">
+                  LKR {p.amountLkr.toLocaleString()}
+                  <span className="text-[#adb5bd] font-normal ml-1">
+                    · {p.daysOverdue} day{p.daysOverdue !== 1 ? 's' : ''} overdue
+                  </span>
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-1.5 flex-shrink-0">
               <button

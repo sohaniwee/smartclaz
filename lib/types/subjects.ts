@@ -120,7 +120,7 @@ export function formatFeeForConfirmation(
   subjects: SubjectEntry[],
   subject: string,
   grade: string,
-  classType: 'individual' | 'batch' | 'trial',
+  classType: 'individual' | 'group' | 'trial',
   batchId?: string,
 ): string {
   const g = findGrade(subjects, subject, grade)
@@ -132,7 +132,7 @@ export function formatFeeForConfirmation(
       ? 'Free (trial class)'
       : `LKR ${g.individual_trial_fee.toLocaleString()} (trial)`
   }
-  if (classType === 'batch') {
+  if (classType === 'group') {
     const batch = batchId
       ? g.batches.find(b => b.id === batchId)
       : g.batches[0]

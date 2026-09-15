@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { cookies } from 'next/headers'
 import { createClient } from '@/lib/supabase/server'
+import { sendWaitlistOffer } from '@/lib/twilio'
 
 function formatTime(t: string): string {
   if (!t) return t
@@ -97,7 +98,15 @@ export async function POST(req: Request) {
     `Reply *YES* to confirm 🙏\n\n` +
     `This offer expires in 48 hours.`
 
-  // TODO: await sendWhatsApp(entry.student_whatsapp, offerMessage)
+  try {
+    await sendWaitlistOffer(entry.student_whatsapp, user.id, offerMessage)
+  } catch (sendErr) {
+    // Non-fatal to the API response — the offer is already recorded and the
+    // conversation context seeded, so the student can still reply if they
+    // happen to message in, but log loudly since this is the one message
+    // that actually tells them a spot opened up.
+    console.error('[waitlist/offer] Failed to send offer WhatsApp message:', sendErr)
+  }
 
   console.log(`[waitlist/offer] Entry ${waitlistId} marked offered — student: ${entry.student_whatsapp}`)
 

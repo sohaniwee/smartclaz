@@ -30,7 +30,7 @@ async function getTutorByChannel(
   // channelId is the tutor's registered WhatsApp number (the "To" field from Twilio).
   const { data, error } = await supabase
     .from('tutors')
-    .select('id, name, phone, whatsapp_number, subjects, payment_instructions, reschedule_policy, noshow_policy')
+    .select('id, name, phone, whatsapp_number, subjects, payment_instructions, reschedule_policy_individual, reschedule_policy_group, noshow_policy_individual, noshow_policy_group')
     .eq('whatsapp_number', channelId)
     .maybeSingle()
 
@@ -45,12 +45,16 @@ async function getTutorByChannel(
   }
 
   return {
-    id:                   data.id,
-    name:                 data.name,
-    phone:                data.phone,
-    whatsapp_number:      data.whatsapp_number,
-    subjects:             data.subjects ?? [],
-    payment_instructions: data.payment_instructions ?? 'Contact tutor for payment details.',
+    id:                           data.id,
+    name:                         data.name,
+    phone:                        data.phone,
+    whatsapp_number:              data.whatsapp_number,
+    subjects:                     data.subjects ?? [],
+    payment_instructions:         data.payment_instructions ?? 'Contact tutor for payment details.',
+    reschedule_policy_individual: data.reschedule_policy_individual ?? undefined,
+    reschedule_policy_group:      data.reschedule_policy_group ?? undefined,
+    noshow_policy_individual:     data.noshow_policy_individual ?? undefined,
+    noshow_policy_group:          data.noshow_policy_group ?? undefined,
   }
 }
 
@@ -451,9 +455,13 @@ export async function processWebhook(
       if (isReturning && student) {
         conversation.context = {
           ...conversation.context,
-          isReturning:          true,
-          existingStudentName:  String((student as Record<string, unknown>).name ?? ''),
-          existingStudentId:    String((student as Record<string, unknown>).id ?? ''),
+          isReturning:            true,
+          existingStudentName:    String((student as Record<string, unknown>).name ?? ''),
+          existingStudentId:      String((student as Record<string, unknown>).id ?? ''),
+          // Fresh from the students table, not inferred/guessed — used to pick
+          // the correct reschedule/no-show policy (see getReschedulePolicy in
+          // handler.ts) without relying on possibly-stale onboarding context.
+          existingStudentClassType: (student as Record<string, unknown>).class_type as string | undefined,
         }
       }
     }
@@ -703,55 +711,31 @@ export async function processWebhook(
       }
     }
 
-    // Handle savePaymentRef: persist reference for regular (non-trial) pending payment
-    if (sideEffects?.savePaymentRef) {
-      try {
-        const supabase = getServiceSupabase()
-        const { reference, studentWhatsapp } = sideEffects.savePaymentRef
-
-        // Look up the student record
-        const { data: studentRec } = await supabase
-          .from('students')
-          .select('id')
-          .eq('tutor_id', tutor.id)
-          .eq('whatsapp', studentWhatsapp)
-          .maybeSingle()
-
-        if (studentRec?.id) {
-          // Update the most recent pending payment for this student
-          const { data: payment } = await supabase
-            .from('payments')
-            .select('id')
-            .eq('tutor_id', tutor.id)
-            .eq('student_id', studentRec.id)
-            .eq('status', 'pending')
-            .eq('is_trial_payment', false)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle()
-
-          if (payment?.id) {
-            await supabase
-              .from('payments')
-              .update({ payment_reference: reference })
-              .eq('id', payment.id)
-          }
-        }
-      } catch (err) {
-        console.error('[webhook] savePaymentRef error:', err)
-      }
-    }
+    // Regular (non-trial) individual/group bookings are now created
+    // atomically inside handleBotMessage's attemptBooking() (see
+    // lib/bot/handler.ts + lib/booking-availability.ts) — the RPC call and
+    // payment-record insert (with payment_reference already set) both
+    // happen there, before the reply is even decided. Nothing left to do
+    // here for that path.
 
     // Handle waitlistJoin side effect
     if (sideEffects?.waitlistJoin) {
       try {
         const supabase = getServiceSupabase()
         const wj = sideEffects.waitlistJoin
-        const { count: position } = await supabase
+
+        // Position query: for a batch waitlist, count others waiting for
+        // the SAME batch; for an individual waitlist there's no batch_id,
+        // so count by subject+grade+class_type instead.
+        let positionQuery = supabase
           .from('waitlist')
           .select('*', { count: 'exact', head: true })
-          .eq('batch_id', wj.batchId)
+          .eq('tutor_id', tutor.id)
           .eq('status', 'waiting')
+        positionQuery = wj.batchId
+          ? positionQuery.eq('batch_id', wj.batchId)
+          : positionQuery.eq('subject', wj.subject).eq('grade', wj.grade).eq('class_type', wj.classType)
+        const { count: position } = await positionQuery
 
         const { error: waitlistInsertErr } = await supabase.from('waitlist').insert({
           tutor_id: tutor.id,
@@ -759,13 +743,14 @@ export async function processWebhook(
           student_whatsapp: wj.studentWhatsapp,
           subject: wj.subject,
           grade: wj.grade,
-          batch_id: wj.batchId,
+          class_type: wj.classType,
+          batch_id: wj.batchId ?? null,
           status: 'waiting',
         })
         if (waitlistInsertErr) {
           console.error('[webhook] waitlistJoin: insert failed — student was told they joined the waitlist but no row exists:', waitlistInsertErr)
         } else {
-          console.log(`[bot] ${wj.studentName} added to waitlist for ${wj.batchName} at position ${(position ?? 0) + 1}`)
+          console.log(`[bot] ${wj.studentName} added to the ${wj.classType} waitlist for ${wj.batchName ?? `${wj.subject} ${wj.grade}`} at position ${(position ?? 0) + 1}`)
         }
       } catch (err) {
         console.error('[webhook] waitlistJoin error:', err)
@@ -784,74 +769,22 @@ export async function processWebhook(
       }
     }
 
-    // Handle waitlistConfirm side effect
-    // ✅ CURRENT: The waitlist entry is only marked 'enrolled' AFTER the
-    //    student row is successfully created — reversed from an earlier
-    //    version that flipped waitlist status first, which could silently
-    //    lose a signup entirely if the student insert then failed (the
-    //    entry would vanish from "waiting" with no student, payment, or
-    //    batch membership ever created).
-    if (sideEffects?.waitlistConfirm) {
+    // Handle waitlistMarkEnrolled side effect — the actual booking (student
+    // insert, capacity check, accepting_new flip, payment record) already
+    // happened atomically in attemptBooking() (lib/bot/handler.ts) by the
+    // time this fires. This just flips the waitlist entry's own status.
+    if (sideEffects?.waitlistMarkEnrolled) {
       try {
         const supabase = getServiceSupabase()
-        const wc = sideEffects.waitlistConfirm
-
-        const { data: newStudent, error: studentErr } = await supabase.from('students').insert({
-          tutor_id: tutor.id,
-          name: wc.studentName,
-          whatsapp: wc.studentWhatsapp,
-          subject: nextContext.chosen_subject ?? '',
-          grade: nextContext.chosen_grade ?? '',
-          class_type: 'group',
-          batch_id: wc.batchId,
-          monthly_fee: wc.batchFee,
-          status: 'active',
-          consent_given: true,
-          consent_at: new Date().toISOString(),
-        }).select().single()
-
-        if (studentErr || !newStudent) {
-          console.error('[webhook] waitlistConfirm: student insert failed — waitlist entry left as-is for retry:', studentErr)
-        } else {
-          const { error: waitlistErr } = await supabase.from('waitlist').update({ status: 'enrolled' }).eq('id', wc.waitlistId)
-          if (waitlistErr) {
-            console.error('[webhook] waitlistConfirm: student created but waitlist status update failed (entry may still show as offered):', waitlistErr)
-          }
-
-          const { error: paymentErr } = await supabase.from('payments').insert({
-            tutor_id: tutor.id,
-            student_id: (newStudent as { id: string }).id,
-            amount_lkr: wc.batchFee,
-            payment_type: 'monthly',
-            month_year: new Date().toISOString().slice(0, 7),
-            status: 'pending',
-            due_date: new Date().toISOString().split('T')[0],
-          })
-          if (paymentErr) {
-            console.error('[webhook] waitlistConfirm: student enrolled but payment record creation failed:', paymentErr)
-          }
-
-          const { count: enrolled } = await supabase
-            .from('students')
-            .select('*', { count: 'exact', head: true })
-            .eq('batch_id', wc.batchId)
-            .eq('status', 'active')
-          const { data: batch } = await supabase
-            .from('batches')
-            .select('max_students')
-            .eq('id', wc.batchId)
-            .single()
-          if (batch && (enrolled ?? 0) >= (batch as { max_students: number }).max_students) {
-            const { error: capacityErr } = await supabase.from('batches').update({ accepting_new: false }).eq('id', wc.batchId)
-            if (capacityErr) {
-              console.error('[webhook] waitlistConfirm: failed to close batch to new signups after reaching capacity:', capacityErr)
-            }
-          }
-
-          console.log(`[bot] ${wc.studentName} enrolled from waitlist into batch ${wc.batchName}`)
+        const { error: waitlistErr } = await supabase
+          .from('waitlist')
+          .update({ status: 'enrolled' })
+          .eq('id', sideEffects.waitlistMarkEnrolled.waitlistId)
+        if (waitlistErr) {
+          console.error('[webhook] waitlistMarkEnrolled: status update failed (booking itself already succeeded):', waitlistErr)
         }
       } catch (err) {
-        console.error('[webhook] waitlistConfirm error:', err)
+        console.error('[webhook] waitlistMarkEnrolled error:', err)
       }
     }
 

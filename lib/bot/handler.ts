@@ -8,9 +8,16 @@
  */
 
 import type { SubjectEntry } from '@/lib/types/subjects'
-import { formatSubjectsForWhatsApp, formatFeeForConfirmation } from '@/lib/types/subjects'
+import { formatSubjectsForWhatsApp, formatFeeForConfirmation, findGrade } from '@/lib/types/subjects'
 import { classifyIntent } from '@/lib/bot/claude-intent'
 import type { MessageHistoryEntry } from '@/lib/bot/claude-intent'
+import {
+  getAvailableIndividualSlots,
+  getAvailableBatches,
+  getAnyBatchForWaitlist,
+  bookIndividualSlot,
+  bookBatchSlot,
+} from '@/lib/booking-availability'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +27,8 @@ export type BotStep =
   | 'collect_subject'
   | 'collect_grade'
   | 'collect_class_type'
+  | 'collect_individual_slot'      // pick a specific open day/time (individual only)
+  | 'collect_batch_selection'      // pick a specific batch with an open spot (group only)
   | 'await_consent'
   | 'awaiting_payment'
   | 'awaiting_payment_reference'
@@ -34,7 +43,18 @@ export interface BotContext {
   student_name?: string
   chosen_subject?: string
   chosen_grade?: string
-  chosen_class_type?: 'individual' | 'batch' | 'trial'
+  chosen_class_type?: 'individual' | 'group' | 'trial'
+  // Set once a specific slot/batch is picked (collect_individual_slot /
+  // collect_batch_selection) — this is what actually gets booked, not just
+  // the class type. chosen_batch_fee is the REAL batches.monthly_fee (not
+  // the tutor's individual_fee monthly_fee field below, which is wrong for
+  // a batch booking — this is what fixes that mix-up).
+  chosen_slot?: { day: string; time: string }
+  chosen_batch_id?: string
+  chosen_batch_fee?: number
+  // Set when routed to the waitlist, so awaiting_waitlist knows which kind
+  // of "spot" the student is waiting for.
+  waitlist_type?: 'individual' | 'group'
   /** ✅ CURRENT: Counts consecutive failed matches in the current step.
    *  When attempts >= 3, bot declares notifyTutor side effect. */
   attempts?: number
@@ -60,12 +80,26 @@ export interface TutorData {
   whatsapp_number?: string
   subjects: SubjectEntry[]
   payment_instructions: string
+  // Split by class type — there's no self-service slot picker, so the
+  // wording differs: individual reschedules are confirmed manually by the
+  // tutor, batch classes have one fixed weekly slot with no per-student
+  // reschedule at all. Optional because older tutor rows may not have
+  // filled these in yet.
+  reschedule_policy_individual?: string
+  reschedule_policy_group?: string
+  noshow_policy_individual?: string
+  noshow_policy_group?: string
 }
 
 /**
  * Actions the webhook processor should run after sending the bot reply.
- * Keeping side-effects out of the handler keeps it a pure function
- * that is easy to test and independent of any provider.
+ * Most side effects here are fire-and-forget (notifications, logging) and
+ * safely run after the reply is already decided. Booking is NOT one of
+ * these — see createIndividualStudent/createGroupStudent below, which are
+ * awaited and resolved (via lib/booking-availability.ts) BEFORE the reply
+ * is built, specifically so the reply can honestly reflect whether the
+ * booking actually succeeded (e.g. "slot taken in the last few seconds")
+ * instead of always claiming success regardless of outcome.
  */
 export interface BotSideEffects {
   /** Send a notification to the tutor (push + messaging). */
@@ -80,7 +114,7 @@ export interface BotSideEffects {
     studentChannelId: string
     subject: string
     grade: string
-    classType: 'individual' | 'batch' | 'trial'
+    classType: 'individual' | 'group' | 'trial'
   }
   // Trial side effects:
   createTrialStudent?: {
@@ -93,27 +127,22 @@ export interface BotSideEffects {
   saveTrialPaymentRef?: {
     reference: string
   }
-  /** Save payment reference for a regular (non-trial) pending payment. */
-  savePaymentRef?: {
-    reference: string
-    studentWhatsapp: string
-  }
   // Waitlist side effects:
   waitlistJoin?: {
     studentName: string
     studentWhatsapp: string
     subject: string
     grade: string
-    batchId: string
-    batchName: string
+    classType: 'individual' | 'group'
+    batchId?: string
+    batchName?: string
+    slot?: { day: string; time: string }
   }
-  waitlistConfirm?: {
+  /** A booking that originated from a waitlist offer succeeded — mark the
+   *  waitlist entry 'enrolled'. The booking itself already happened via
+   *  attemptBooking()'s atomic RPC call by the time this is declared. */
+  waitlistMarkEnrolled?: {
     waitlistId: string
-    batchId: string
-    studentName: string
-    studentWhatsapp: string
-    batchName: string
-    batchFee: number
   }
   waitlistDecline?: {
     waitlistId: string
@@ -141,6 +170,33 @@ function resetAttempts(context: BotContext): BotContext {
 
 function isStuck(context: BotContext): boolean {
   return (context.attempts ?? 0) >= MAX_ATTEMPTS
+}
+
+// ── Reschedule / no-show policy lookup ───────────────────────────────────────
+// Direct lookup by class type — no Claude interpretation needed, and no
+// pretending a single combined field can honestly describe both an
+// individually-confirmed reschedule and a fixed-slot batch class at once.
+// 'trial' is treated as individual — trials are one-on-one bookings in this
+// app, the same as an individual class, just not yet a paying one.
+// 📝 NOTE: students.class_type is inconsistently written as 'batch' (bot
+// onboarding's chosen_class_type, AddStudentModal/EditStudentPanel) vs
+// 'group' (waitlist-confirm insert in process-webhook.ts, CSVUpload) across
+// the codebase — check both, matching the same defensive pattern already
+// used in app/api/payments/verify/route.ts.
+function isGroupClassType(classType: string | undefined): boolean {
+  return classType === 'batch' || classType === 'group'
+}
+
+function getReschedulePolicy(tutor: TutorData, classType: string | undefined): string | undefined {
+  return isGroupClassType(classType)
+    ? tutor.reschedule_policy_group
+    : tutor.reschedule_policy_individual
+}
+
+function getNoshowPolicy(tutor: TutorData, classType: string | undefined): string | undefined {
+  return isGroupClassType(classType)
+    ? tutor.noshow_policy_group
+    : tutor.noshow_policy_individual
 }
 
 /**
@@ -224,13 +280,19 @@ function classTypeReply(subject: string, grade: string, subjects: SubjectEntry[]
   const trialFeeAmt = gc.individual_trial_fee
     ?? (typeof raw.trial_fee === 'number' ? raw.trial_fee : 0)
 
+  // taking_new_individual: false means the tutor has closed individual
+  // enrollment for this subject+grade entirely — don't offer it as an
+  // option at all, same as a full batch shouldn't silently vanish (that
+  // case routes to the waitlist instead, at selection time).
+  const individualOpen = gc.individual_fee && gc.taking_new_individual !== false
+
   const options: string[] = []
   let idx = 1
-  if (gc.individual_fee) {
+  if (individualOpen) {
     options.push(`${idx++}. *Individual* — ${formatFeeForConfirmation(subjects, subject, grade, 'individual')}`)
   }
   if (hasGroup) {
-    options.push(`${idx++}. *Group* — ${formatFeeForConfirmation(subjects, subject, grade, 'batch')}`)
+    options.push(`${idx++}. *Group* — ${formatFeeForConfirmation(subjects, subject, grade, 'group')}`)
   }
 
   // Only offer trial if trial_type is not 'none'
@@ -252,11 +314,155 @@ function classTypeReply(subject: string, grade: string, subjects: SubjectEntry[]
   )
 }
 
+// ── attemptBooking ────────────────────────────────────────────────────────
+// Called once a payment reference is captured for a regular (non-trial)
+// booking. Does the ACTUAL atomic insert (via lib/booking-availability.ts,
+// which wraps the book_individual_slot / book_batch_slot Postgres
+// functions) and branches the reply on the real outcome — this is why it's
+// awaited here rather than declared as a fire-and-forget side effect: the
+// reply must not claim success before we actually know it happened.
+async function attemptBooking(
+  tutor: TutorData,
+  subjects: SubjectEntry[],
+  context: BotContext,
+  from: string,
+  reference: string,
+): Promise<BotResult> {
+  if (context.chosen_class_type === 'individual' && context.chosen_slot) {
+    const result = await bookIndividualSlot({
+      tutorId: tutor.id,
+      subject: context.chosen_subject!,
+      grade: context.chosen_grade!,
+      day: context.chosen_slot.day,
+      time: context.chosen_slot.time,
+      name: context.student_name ?? 'Unknown',
+      whatsapp: from,
+      monthlyFee: (context.monthly_fee as number) ?? 0,
+      paymentReference: reference,
+    })
+
+    if (!result.success) {
+      // Lost the race — someone else took this exact slot between it being
+      // listed and this student confirming. Re-fetch what's still open and
+      // show it in the same turn rather than a vague "try again" reply.
+      const gc = findGrade(subjects, context.chosen_subject!, context.chosen_grade!)
+      const stillAvailable = await getAvailableIndividualSlots(
+        tutor.id, context.chosen_subject!, context.chosen_grade!, gc?.individual_slots ?? [],
+      )
+      if (stillAvailable.length === 0) {
+        return {
+          reply:
+            `Sorry, that time slot was just taken and there's nothing else open right now for *${context.chosen_grade} ${context.chosen_subject}*.\n\n` +
+            `Want to join the waitlist? Reply *YES*.`,
+          nextContext: { ...context, step: 'awaiting_waitlist', waitlist_type: 'individual', chosen_slot: undefined },
+        }
+      }
+      const optionsList = stillAvailable.map((s, i) => `${i + 1}. ${s.day} at ${s.time}`).join('\n')
+      return {
+        reply: `Sorry, that time slot was just taken by another student. Here's what's still open:\n\n${optionsList}\n\nReply with the number.`,
+        nextContext: { ...context, step: 'collect_individual_slot', chosen_slot: undefined },
+      }
+    }
+
+    return {
+      reply:
+        `Thank you! Reference *${reference}* noted 🙏\n\n` +
+        `${tutor.name} will verify shortly and send your class link.`,
+      nextContext: { ...context, step: 'existing_student', paymentReference: reference },
+      sideEffects: {
+        notifyTutor:
+          `💰 Payment received from *${context.student_name ?? 'student'}*\n` +
+          `${context.chosen_subject} · ${context.chosen_grade} · Individual · ${context.chosen_slot.day} ${context.chosen_slot.time}\n` +
+          `Ref: *${reference}*\nPlease verify and mark as paid.`,
+      },
+    }
+  }
+
+  if (context.chosen_class_type === 'group' && context.chosen_batch_id) {
+    const result = await bookBatchSlot({
+      tutorId: tutor.id,
+      batchId: context.chosen_batch_id,
+      name: context.student_name ?? 'Unknown',
+      whatsapp: from,
+      subject: context.chosen_subject!,
+      grade: context.chosen_grade!,
+      monthlyFee: context.chosen_batch_fee ?? 0,
+      paymentReference: reference,
+    })
+
+    if (!result.success) {
+      // Lost the race — this batch filled up between being listed and this
+      // student confirming. Re-fetch other open batches for the same
+      // subject/grade rather than dead-ending.
+      const stillAvailable = await getAvailableBatches(tutor.id, context.chosen_subject!, context.chosen_grade!)
+      if (stillAvailable.length === 0) {
+        return {
+          reply: `Sorry, that batch just filled up and there's nothing else open right now. Want to join the waitlist? Reply *YES*.`,
+          nextContext: {
+            ...context,
+            step: 'awaiting_waitlist',
+            waitlist_type: 'group',
+            targetBatchId: context.chosen_batch_id,
+            chosen_batch_id: undefined,
+            chosen_batch_fee: undefined,
+          },
+        }
+      }
+      const optionsList = stillAvailable.map((b, i) => `${i + 1}. ${b.name} — ${b.schedule_day} ${b.schedule_time}`).join('\n')
+      return {
+        reply: `Sorry, that batch just filled up. Here's what's still open:\n\n${optionsList}\n\nReply with the number.`,
+        nextContext: { ...context, step: 'collect_batch_selection', chosen_batch_id: undefined, chosen_batch_fee: undefined },
+      }
+    }
+
+    return {
+      reply:
+        `Thank you! Reference *${reference}* noted 🙏\n\n` +
+        `${tutor.name} will verify shortly and send your class link.`,
+      nextContext: { ...context, step: 'existing_student', paymentReference: reference, waitlistId: undefined },
+      sideEffects: {
+        notifyTutor:
+          `💰 Payment received from *${context.student_name ?? 'student'}*\n` +
+          `${context.chosen_subject} · ${context.chosen_grade} · Group\n` +
+          `Ref: *${reference}*\nPlease verify and mark as paid.`,
+        // If this booking came from a tutor-offered waitlist spot
+        // (awaiting_waitlist_confirm), mark that entry enrolled now that
+        // the atomic insert above has actually succeeded.
+        ...(context.waitlistId ? { waitlistMarkEnrolled: { waitlistId: context.waitlistId as string } } : {}),
+      },
+    }
+  }
+
+  // Shouldn't normally be reached (trial has its own steps, and individual/
+  // group always set chosen_slot/chosen_batch_id before reaching payment) —
+  // fail safe by still capturing the reference and alerting the tutor,
+  // rather than silently dropping it.
+  return {
+    reply:
+      `Got it! Reference *${reference}* noted 🙏\n\n` +
+      `${tutor.name} will verify shortly and send your class link.`,
+    nextContext: { ...context, step: 'existing_student', paymentReference: reference },
+    sideEffects: {
+      notifyTutor:
+        `💰 Payment from *${context.student_name ?? 'student'}* — could not auto-book (missing slot/batch selection), please follow up manually.\n` +
+        `Ref: *${reference}*`,
+    },
+  }
+}
+
 // ── State machine ──────────────────────────────────────────────────────────
 //
-// Pure function — no I/O, no provider imports except claude-intent.
-// Side effects are declared in BotResult.sideEffects and executed by
-// the caller (process-webhook.ts) using the appropriate providers.
+// Mostly a pure function — no I/O, no provider imports except claude-intent
+// — with two deliberate exceptions: collect_individual_slot/
+// collect_batch_selection read live availability, and attemptBooking()
+// above does the actual atomic booking write. Both are real-time-dependent
+// by nature (an "available slot" is only true right now, not at whatever
+// point the tutor last edited their config), so faking purity here would
+// mean either showing stale availability or not knowing whether a booking
+// actually succeeded before replying — see attemptBooking's own comment.
+// Everything else in this file remains side-effect-free; DB writes for
+// notifications, consent, trials, and waitlist entries are still declared
+// via BotResult.sideEffects and executed by the caller (process-webhook.ts).
 
 export async function handleBotMessage(
   text: string,
@@ -430,23 +636,24 @@ export async function handleBotMessage(
 
       let classType: BotContext['chosen_class_type']
 
-      // Number pick: 1=individual, 2=batch, 3=trial
+      // Number pick: 1=individual, 2=group, 3=trial
       if (intent.type === 'pick_number' && typeof intent.value === 'number') {
         if (intent.value === 1) classType = 'individual'
-        else if (intent.value === 2) classType = 'batch'
+        else if (intent.value === 2) classType = 'group'
         else if (intent.value === 3) classType = 'trial'
       }
 
       // Named pick from Claude
       if (!classType && intent.type === 'pick_class_type' && intent.value) {
-        classType = intent.value as BotContext['chosen_class_type']
+        const v = intent.value as string
+        classType = v === 'batch' ? 'group' : (v as BotContext['chosen_class_type'])
       }
 
       // Fallback string matching
       if (!classType) {
         const lower = t.toLowerCase()
         if (lower.includes('individual'))                        classType = 'individual'
-        else if (lower.includes('batch') || lower.includes('group')) classType = 'batch'
+        else if (lower.includes('batch') || lower.includes('group')) classType = 'group'
         else if (lower.includes('trial'))                        classType = 'trial'
       }
 
@@ -454,7 +661,7 @@ export async function handleBotMessage(
         const next = incrementAttempts(context)
         if (isStuck(next)) return stuckResponse(next, tutor.name)
         return {
-          reply: `Please reply with *1* (Individual), *2* (Batch), or *3* (Trial).`,
+          reply: `Please reply with *1* (Individual), *2* (Group), or *3* (Trial).`,
           nextContext: next,
         }
       }
@@ -530,14 +737,85 @@ export async function handleBotMessage(
         }
       }
 
-      // ── Regular class path (individual / batch) ──────────────────────────
-      const fee = formatFeeForConfirmation(subjects, context.chosen_subject!, context.chosen_grade!, classType)
+      // ── Individual: route to real slot selection, not straight to consent ──
+      // Enforcement backstop: even if classTypeReply() didn't show this
+      // option (taking_new_individual === false), a student could still
+      // type "1" / "individual" directly — reject it here too, not just
+      // at display time.
+      if (classType === 'individual') {
+        const gc = findGrade(subjects, context.chosen_subject!, context.chosen_grade!)
+        if (!gc?.individual_fee || gc.taking_new_individual === false) {
+          return {
+            reply:
+              `Sorry, individual classes for *${context.chosen_subject} (${context.chosen_grade})* aren't available right now.\n\n` +
+              `Please choose *2* (Group) or *3* (Trial), or contact ${tutor.name} directly.`,
+            nextContext: incrementAttempts(context),
+          }
+        }
+        return {
+          reply: `One moment, checking open times for *${context.chosen_subject} (${context.chosen_grade})*...`,
+          nextContext: resetAttempts({ ...context, step: 'collect_individual_slot', chosen_class_type: 'individual' }),
+        }
+      }
+
+      // ── Group: route to real batch selection, not straight to consent ──
+      return {
+        reply: `One moment, checking open batches for *${context.chosen_subject} (${context.chosen_grade})*...`,
+        nextContext: resetAttempts({ ...context, step: 'collect_batch_selection', chosen_class_type: 'group' }),
+      }
+    }
+
+    // ── collect_individual_slot ─────────────────────────────────────────────
+    // 📝 NOTE: Unlike most of this file, this step does a live DB read
+    // (getAvailableIndividualSlots) — availability has to reflect who's
+    // actually booked right now, not just the tutor's static config, which
+    // is the entire point of the fix this step exists for. See the file-level
+    // note on BotSideEffects for how booking itself stays consistent with
+    // this despite the reply normally being decided before any DB write.
+    case 'collect_individual_slot': {
+      const gc = findGrade(subjects, context.chosen_subject!, context.chosen_grade!)
+      const configuredSlots = gc?.individual_slots ?? []
+      const available = await getAvailableIndividualSlots(
+        tutor.id, context.chosen_subject!, context.chosen_grade!, configuredSlots,
+      )
+
+      if (available.length === 0) {
+        return {
+          reply:
+            `All individual slots for *${context.chosen_grade} ${context.chosen_subject}* are full right now.\n\n` +
+            `Want to join the waitlist? Reply *YES* and we'll message you the moment one opens up.`,
+          nextContext: { ...context, step: 'awaiting_waitlist', waitlist_type: 'individual' },
+        }
+      }
+
+      const pick = t.match(/^\d+$/) ? parseInt(t, 10) : null
+      if (!pick) {
+        const optionsList = available.map((s, i) => `${i + 1}. ${s.day} at ${s.time}`).join('\n')
+        return {
+          reply: `Available times for *${context.chosen_grade} ${context.chosen_subject}*:\n\n${optionsList}\n\nReply with the number.`,
+          nextContext: context,
+        }
+      }
+
+      const chosen = available[pick - 1]
+      if (!chosen) {
+        const next = incrementAttempts(context)
+        if (isStuck(next)) return stuckResponse(next, tutor.name)
+        const optionsList = available.map((s, i) => `${i + 1}. ${s.day} at ${s.time}`).join('\n')
+        return {
+          reply: `That's not one of the options. Please pick a number:\n\n${optionsList}`,
+          nextContext: next,
+        }
+      }
+
+      const fee = formatFeeForConfirmation(subjects, context.chosen_subject!, context.chosen_grade!, 'individual')
       return {
         reply:
-          `Perfect!\n\nBooking summary:\n` +
+          `Great, ${chosen.day} at ${chosen.time}!\n\nBooking summary:\n` +
           `• Subject: *${context.chosen_subject}*\n` +
           `• Grade: *${context.chosen_grade}*\n` +
-          `• Class type: *${classType[0].toUpperCase() + classType.slice(1)}*\n` +
+          `• Class type: *Individual*\n` +
+          `• Time: *${chosen.day} ${chosen.time}*\n` +
           `• Fee: *${fee}*\n\n` +
           `Class rules:\n` +
           `1. Attend on time — class starts without waiting\n` +
@@ -545,7 +823,70 @@ export async function handleBotMessage(
           `3. Reschedule requests require 24 hours notice\n` +
           `4. Maintain discipline and respect during class\n\n` +
           `Reply *AGREE* to confirm you have read and accept these rules.`,
-        nextContext: resetAttempts({ ...context, step: 'await_consent', chosen_class_type: classType }),
+        nextContext: resetAttempts({ ...context, chosen_slot: chosen, step: 'await_consent' }),
+      }
+    }
+
+    // ── collect_batch_selection ─────────────────────────────────────────────
+    case 'collect_batch_selection': {
+      const available = await getAvailableBatches(tutor.id, context.chosen_subject!, context.chosen_grade!)
+
+      if (available.length === 0) {
+        const target = await getAnyBatchForWaitlist(tutor.id, context.chosen_subject!, context.chosen_grade!)
+        return {
+          reply:
+            `All batches for *${context.chosen_grade} ${context.chosen_subject}* are full right now.\n\n` +
+            `Want to join the waitlist? Reply *YES* and we'll message you the moment a spot opens up.`,
+          nextContext: {
+            ...context,
+            step: 'awaiting_waitlist',
+            waitlist_type: 'group',
+            targetBatchId: target?.id,
+            targetBatchName: target?.name,
+          },
+        }
+      }
+
+      const pick = t.match(/^\d+$/) ? parseInt(t, 10) : null
+      if (!pick) {
+        const optionsList = available.map((b, i) => `${i + 1}. ${b.name} — ${b.schedule_day} ${b.schedule_time}`).join('\n')
+        return {
+          reply: `Available batches for *${context.chosen_grade} ${context.chosen_subject}*:\n\n${optionsList}\n\nReply with the number.`,
+          nextContext: context,
+        }
+      }
+
+      const chosen = available[pick - 1]
+      if (!chosen) {
+        const next = incrementAttempts(context)
+        if (isStuck(next)) return stuckResponse(next, tutor.name)
+        const optionsList = available.map((b, i) => `${i + 1}. ${b.name} — ${b.schedule_day} ${b.schedule_time}`).join('\n')
+        return {
+          reply: `That's not one of the options. Please pick a number:\n\n${optionsList}`,
+          nextContext: next,
+        }
+      }
+
+      return {
+        reply:
+          `Great, you're set for *${chosen.name}*!\n\nBooking summary:\n` +
+          `• Subject: *${context.chosen_subject}*\n` +
+          `• Grade: *${context.chosen_grade}*\n` +
+          `• Class type: *Group*\n` +
+          `• Batch: *${chosen.name}* — ${chosen.schedule_day} ${chosen.schedule_time}\n` +
+          `• Fee: *LKR ${chosen.monthly_fee.toLocaleString()}/month*\n\n` +
+          `Class rules:\n` +
+          `1. Attend on time — class starts without waiting\n` +
+          `2. Monthly fees due by the 5th\n` +
+          `3. Batch classes have one fixed weekly time — see the batch reschedule policy for what happens if you miss one\n` +
+          `4. Maintain discipline and respect during class\n\n` +
+          `Reply *AGREE* to confirm you have read and accept these rules.`,
+        nextContext: resetAttempts({
+          ...context,
+          chosen_batch_id: chosen.id,
+          chosen_batch_fee: chosen.monthly_fee,
+          step: 'await_consent',
+        }),
       }
     }
 
@@ -648,18 +989,7 @@ export async function handleBotMessage(
       const reference = refMatch ? refMatch[1] : null
 
       if (reference) {
-        return {
-          reply:
-            `Thank you! Reference *${reference}* noted 🙏\n\n` +
-            `${tutor.name} will verify shortly and send your class link.`,
-          nextContext: { ...context, step: 'existing_student', paymentReference: reference },
-          sideEffects: {
-            savePaymentRef: { reference, studentWhatsapp: from },
-            notifyTutor:
-              `💰 Payment received from *${context.student_name ?? 'student'}*\n` +
-              `Ref: *${reference}*\nPlease verify and mark as paid.`,
-          },
-        }
+        return attemptBooking(tutor, subjects, context, from, reference)
       }
 
       // No reference found — ask for it
@@ -674,18 +1004,7 @@ export async function handleBotMessage(
     case 'awaiting_payment_reference': {
       // Any response treated as the reference
       const reference = t.trim().slice(0, 50)
-      return {
-        reply:
-          `Got it! Reference *${reference}* noted 🙏\n\n` +
-          `${tutor.name} will verify shortly and send your class link.`,
-        nextContext: { ...context, step: 'existing_student', paymentReference: reference },
-        sideEffects: {
-          savePaymentRef: { reference, studentWhatsapp: from },
-          notifyTutor:
-            `💰 Payment from *${context.student_name ?? 'student'}*\n` +
-            `Ref: *${reference}*\nPlease verify and mark as paid.`,
-        },
-      }
+      return attemptBooking(tutor, subjects, context, from, reference)
     }
 
     // ── existing_student ──────────────────────────────────────────────────
@@ -701,10 +1020,24 @@ export async function handleBotMessage(
       }
 
       if (intent.type === 'reschedule') {
+        // Prefer the freshly-looked-up class_type from returning-student
+        // detection (see process-webhook.ts); fall back to chosen_class_type
+        // for a student still in the same onboarding conversation.
+        const classType = (context['existingStudentClassType'] as string | undefined)
+          ?? context.chosen_class_type
+        const reschedulePolicy = getReschedulePolicy(tutor, classType)
+
+        // Individual (and trial): the tutor manually confirms a new time —
+        // no self-service picker exists, so the reply must not sound like
+        // one. Batch: there's no per-student reschedule step at all, so the
+        // policy text is stated directly with no "confirming a new time" framing.
+        const reply = isGroupClassType(classType)
+          ? (reschedulePolicy ?? `Please contact ${tutor.name} directly about rescheduling.`)
+          : `Got it! I've let *${tutor.name}* know you'd like to reschedule.\n\n` +
+            (reschedulePolicy ?? `They will confirm a new time with you shortly.`)
+
         return {
-          reply:
-            `I've forwarded your reschedule request to *${tutor.name}*. 🙏\n\n` +
-            `They will confirm the new time shortly.`,
+          reply,
           nextContext: { ...context },
           sideEffects: {
             notifyTutor: `📅 *${context.student_name ?? 'A student'}* wants to reschedule. Message: "${t}"`,
@@ -744,20 +1077,32 @@ export async function handleBotMessage(
     case 'awaiting_waitlist': {
       const isYes = /\byes\b/i.test(t) || t.trim() === '1'
       if (isYes) {
+        const isGroup = ctx.waitlist_type === 'group'
         return {
-          reply:
-            `✅ You've been added to the waitlist for ${ctx.targetBatchName}!\n\n` +
-            `Sir will message you when a spot opens 🙏\n\n` +
-            `We'll reach out to this number.`,
-          nextContext: { ...ctx, step: 'greeting' as BotStep, waitlistId: undefined, targetBatchId: undefined, targetBatchName: undefined, targetBatchFee: undefined, offerExpiresAt: undefined },
+          reply: isGroup
+            ? `✅ You've been added to the waitlist${ctx.targetBatchName ? ` for ${ctx.targetBatchName}` : ''}!\n\n` +
+              `Sir will message you when a spot opens 🙏\n\nWe'll reach out to this number.`
+            : `✅ You've been added to the waitlist for *${ctx.chosen_grade} ${ctx.chosen_subject}* (individual)!\n\n` +
+              `Sir will message you when a time opens up 🙏\n\nWe'll reach out to this number.`,
+          nextContext: {
+            ...ctx,
+            step: 'greeting' as BotStep,
+            waitlist_type: undefined,
+            waitlistId: undefined,
+            targetBatchId: undefined,
+            targetBatchName: undefined,
+            targetBatchFee: undefined,
+            offerExpiresAt: undefined,
+          },
           sideEffects: {
             waitlistJoin: {
               studentName: ctx.student_name ?? 'Student',
               studentWhatsapp: from,
               subject: ctx.chosen_subject ?? '',
               grade: ctx.chosen_grade ?? '',
-              batchId: ctx.targetBatchId ?? '',
-              batchName: ctx.targetBatchName ?? '',
+              classType: isGroup ? 'group' : 'individual',
+              batchId: isGroup ? ctx.targetBatchId : undefined,
+              batchName: isGroup ? ctx.targetBatchName : undefined,
             },
           },
         }
@@ -780,22 +1125,23 @@ export async function handleBotMessage(
             sideEffects: { waitlistDecline: { waitlistId: ctx.waitlistId as string } },
           }
         }
+        // Route through the exact same atomic booking path as a direct
+        // booking (attemptBooking, once the payment reference arrives) —
+        // chosen_class_type/chosen_batch_id/chosen_batch_fee are what it
+        // reads. waitlistId stays in context so a successful booking there
+        // can mark this waitlist entry 'enrolled' (see attemptBooking).
         return {
           reply:
             `🎉 Great! We're enrolling you in ${ctx.targetBatchName ?? 'the batch'}.\n\n` +
             `To confirm your spot, please make your first payment:\n\n` +
             `💰 LKR ${(ctx.targetBatchFee as number ?? 0).toLocaleString()}/month\n\n` +
             `Reply with your payment reference when done 🙏`,
-          nextContext: { ...ctx, step: 'awaiting_payment' as BotStep, fromWaitlist: true },
-          sideEffects: {
-            waitlistConfirm: {
-              waitlistId: ctx.waitlistId as string,
-              batchId: ctx.targetBatchId as string,
-              studentName: ctx.student_name ?? 'Student',
-              studentWhatsapp: from,
-              batchName: ctx.targetBatchName as string,
-              batchFee: ctx.targetBatchFee as number,
-            },
+          nextContext: {
+            ...ctx,
+            step: 'awaiting_payment' as BotStep,
+            chosen_class_type: 'group',
+            chosen_batch_id: ctx.targetBatchId as string,
+            chosen_batch_fee: ctx.targetBatchFee as number,
           },
         }
       }

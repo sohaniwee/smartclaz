@@ -96,7 +96,7 @@ export default function AddSessionModal({ tutorId, onClose, onCreated }: AddSess
         .select('id, name, subject, grade, monthly_fee, session_duration_mins')
         .eq('tutor_id', tutorId)
         .eq('status', 'active')
-        .neq('class_type', 'batch')
+        .neq('class_type', 'group')
         .order('name', { ascending: true }),
       supabase
         .from('batches')

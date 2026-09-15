@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { FileText, CalendarDays, ShieldAlert, Bell } from 'lucide-react'
+import { FileText, CalendarDays, ShieldAlert, Bell, Flag } from 'lucide-react'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -25,7 +25,22 @@ const GRACE_OPTIONS: { value: GracePeriod; label: string; sublabel: string }[] =
   { value: '7', label: '7 days', sublabel: 'Lenient — better for long-term students' },
 ]
 
+const BLOCK_REMINDER_DAYS = ['3', '5', '7', '10', '14']
+
 const MAX_INSTRUCTIONS = 500
+
+// ── QuestionLabel ─────────────────────────────────────────────────────────────
+
+function QuestionLabel({ n }: { n: number }) {
+  return (
+    <span
+      className="text-[0.56rem] font-bold text-[#748ffc] uppercase tracking-[0.12em] flex-shrink-0"
+      style={{ fontFamily: "'JetBrains Mono', monospace" }}
+    >
+      Q{n}
+    </span>
+  )
+}
 
 // ── StepProgress ──────────────────────────────────────────────────────────────
 
@@ -106,6 +121,11 @@ export default function PaymentsSetupPage() {
   const [gracePeriod, setGracePeriod] = useState<GracePeriod>('5')
   // Default Yes — safer default, less manual work for most tutors
   const [autoNotify, setAutoNotify] = useState(true)
+  // Q4 — escalation ("blocking nudge") preference. Distinct from autoNotify:
+  // this never messages students or blocks anyone, it only makes an overdue
+  // payment's card louder for the tutor after blockReminderDays days overdue.
+  const [blockReminderEnabled, setBlockReminderEnabled] = useState(true)
+  const [blockReminderDays, setBlockReminderDays] = useState('7')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [fieldError, setFieldError] = useState('')
@@ -123,7 +143,7 @@ export default function PaymentsSetupPage() {
 
       const { data } = await supabase
         .from('tutors')
-        .select('payment_instructions, monthly_due_date, grace_period_days, auto_notify_overdue')
+        .select('payment_instructions, monthly_due_date, grace_period_days, auto_notify_overdue, block_reminder_enabled, block_reminder_days')
         .eq('id', user.id)
         .single()
 
@@ -132,6 +152,8 @@ export default function PaymentsSetupPage() {
         if (data.monthly_due_date) setDueDate(String(data.monthly_due_date))
         if (data.grace_period_days) setGracePeriod(String(data.grace_period_days) as GracePeriod)
         if (typeof data.auto_notify_overdue === 'boolean') setAutoNotify(data.auto_notify_overdue)
+        if (typeof data.block_reminder_enabled === 'boolean') setBlockReminderEnabled(data.block_reminder_enabled)
+        if (data.block_reminder_days) setBlockReminderDays(String(data.block_reminder_days))
       }
 
       setAuthChecked(true)
@@ -168,6 +190,8 @@ export default function PaymentsSetupPage() {
         monthly_due_date: parseInt(dueDate),
         grace_period_days: parseInt(gracePeriod),
         auto_notify_overdue: autoNotify,
+        block_reminder_enabled: blockReminderEnabled,
+        block_reminder_days: blockReminderEnabled ? parseInt(blockReminderDays) : null,
       })
       .eq('id', userId)
 
@@ -258,19 +282,19 @@ export default function PaymentsSetupPage() {
             </div>
           </div>
 
-          {/* ── Section 2: Monthly Due Date ── */}
+          {/* ── Q1: Monthly Due Date ── */}
           <div className="border border-[#dee2e6] rounded-[18px] p-5 space-y-3 bg-white shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
             <div className="flex items-start gap-3">
               <div className="w-8 h-8 rounded-[8px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0 mt-0.5">
                 <CalendarDays size={15} className="text-white" />
               </div>
               <div>
-                <h2 className="text-[0.84rem] font-bold text-[#1a1a2e] tracking-[-0.01em]">
-                  Monthly Payment Due Date
-                </h2>
-                <p className="text-[#6c757d] text-xs mt-0.5 leading-relaxed">
-                  Reminders are sent 3 days before, on the day, and 3 and 7 days after.
-                </p>
+                <div className="flex items-center gap-2">
+                  <QuestionLabel n={1} />
+                  <h2 className="text-[0.84rem] font-bold text-[#1a1a2e] tracking-[-0.01em]">
+                    When are monthly payments due?
+                  </h2>
+                </div>
               </div>
             </div>
 
@@ -292,19 +316,19 @@ export default function PaymentsSetupPage() {
             </div>
           </div>
 
-          {/* ── Section 3: Grace Period ── */}
+          {/* ── Q2: Grace Period ── */}
           <div className="border border-[#dee2e6] rounded-[18px] p-5 space-y-3 bg-white shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
             <div className="flex items-start gap-3">
               <div className="w-8 h-8 rounded-[8px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0 mt-0.5">
                 <ShieldAlert size={15} className="text-white" />
               </div>
               <div>
-                <h2 className="text-[0.84rem] font-bold text-[#1a1a2e] tracking-[-0.01em]">
-                  Grace Period Before Access is Blocked
-                </h2>
-                <p className="text-[#6c757d] text-xs mt-0.5 leading-relaxed">
-                  After this many days overdue, the application stops sending Zoom links to the student.
-                </p>
+                <div className="flex items-center gap-2">
+                  <QuestionLabel n={2} />
+                  <h2 className="text-[0.84rem] font-bold text-[#1a1a2e] tracking-[-0.01em]">
+                    How many days after the due date before we mark it overdue?
+                  </h2>
+                </div>
               </div>
             </div>
 
@@ -348,21 +372,28 @@ export default function PaymentsSetupPage() {
                 )
               })}
             </div>
+
+            <div className="flex items-start gap-2 bg-[#edf2ff] border border-[#dbe4ff] rounded-[10px] px-3 py-2.5">
+              <span className="text-sm flex-shrink-0 leading-none mt-0.5">💡</span>
+              <p className="text-[#3b5bdb] text-xs leading-relaxed">
+                This only changes when a payment shows as overdue on your dashboard — it never blocks anyone automatically.
+              </p>
+            </div>
           </div>
 
-          {/* ── Section 4: Payment Reminders (auto-notify consent) ── */}
+          {/* ── Q3: Payment Reminders (auto-notify consent) ── */}
           <div className="border border-[#dee2e6] rounded-[18px] p-5 space-y-3 bg-white shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
             <div className="flex items-start gap-3">
               <div className="w-8 h-8 rounded-[8px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0 mt-0.5">
                 <Bell size={15} className="text-white" />
               </div>
               <div>
-                <h2 className="text-[0.84rem] font-bold text-[#1a1a2e] tracking-[-0.01em]">
-                  Payment Reminders
-                </h2>
-                <p className="text-[#6c757d] text-xs mt-0.5 leading-relaxed">
-                  Automatically remind students when payment is due or overdue?
-                </p>
+                <div className="flex items-center gap-2">
+                  <QuestionLabel n={3} />
+                  <h2 className="text-[0.84rem] font-bold text-[#1a1a2e] tracking-[-0.01em]">
+                    Should we remind students automatically, or just tell you?
+                  </h2>
+                </div>
               </div>
             </div>
 
@@ -387,7 +418,7 @@ export default function PaymentsSetupPage() {
                       Yes, send automatically (Recommended)
                     </p>
                     <p className="text-[#6c757d] text-xs">
-                      We&apos;ll message students for you at 3 days before, on the due date, and if payment is overdue.
+                      We&apos;ll message students 3 days before it&apos;s due, on the due date, and once if it becomes overdue.
                     </p>
                   </div>
                 </div>
@@ -418,6 +449,93 @@ export default function PaymentsSetupPage() {
                   </div>
                 </div>
               </button>
+            </div>
+          </div>
+
+          {/* ── Q4: Escalation ("blocking nudge") preference ── */}
+          <div className="border border-[#dee2e6] rounded-[18px] p-5 space-y-3 bg-white shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-[8px] bg-[#3b5bdb] flex items-center justify-center flex-shrink-0 mt-0.5">
+                <Flag size={15} className="text-white" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <QuestionLabel n={4} />
+                  <h2 className="text-[0.84rem] font-bold text-[#1a1a2e] tracking-[-0.01em]">
+                    If a payment stays overdue a long time, want it flagged more urgently so you remember to act?
+                  </h2>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setBlockReminderEnabled(true)}
+                className={`w-full text-left rounded-[12px] border px-4 py-3 transition-all duration-150 ${
+                  blockReminderEnabled
+                    ? 'border-[#3b5bdb] bg-[#edf2ff] shadow-[0_0_0_1px_#3b5bdb]'
+                    : 'border-[#dee2e6] bg-white hover:border-[#3b5bdb] hover:bg-[#f8f9ff]'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-all ${
+                    blockReminderEnabled ? 'border-[#3b5bdb]' : 'border-[#ced4da]'
+                  }`}>
+                    {blockReminderEnabled && <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />}
+                  </div>
+                  <p className={`text-sm font-semibold leading-none ${blockReminderEnabled ? 'text-[#3b5bdb]' : 'text-[#1a1a2e]'}`}>
+                    Yes — flag it after a set number of days overdue
+                  </p>
+                </div>
+              </button>
+
+              {blockReminderEnabled && (
+                <div className="pl-7 flex flex-wrap gap-2">
+                  {BLOCK_REMINDER_DAYS.map(d => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => setBlockReminderDays(d)}
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-bold border transition-all duration-150 ${
+                        blockReminderDays === d
+                          ? 'bg-[#3b5bdb] text-white border-[#3b5bdb] shadow-[0_2px_8px_rgba(59,91,219,0.25)]'
+                          : 'bg-white text-[#343a40] border-[#ced4da] hover:border-[#3b5bdb] hover:text-[#3b5bdb]'
+                      }`}
+                    >
+                      {d} days
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setBlockReminderEnabled(false)}
+                className={`w-full text-left rounded-[12px] border px-4 py-3 transition-all duration-150 ${
+                  !blockReminderEnabled
+                    ? 'border-[#3b5bdb] bg-[#edf2ff] shadow-[0_0_0_1px_#3b5bdb]'
+                    : 'border-[#dee2e6] bg-white hover:border-[#3b5bdb] hover:bg-[#f8f9ff]'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-all ${
+                    !blockReminderEnabled ? 'border-[#3b5bdb]' : 'border-[#ced4da]'
+                  }`}>
+                    {!blockReminderEnabled && <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />}
+                  </div>
+                  <p className={`text-sm font-semibold leading-none ${!blockReminderEnabled ? 'text-[#3b5bdb]' : 'text-[#1a1a2e]'}`}>
+                    No — just show it as overdue
+                  </p>
+                </div>
+              </button>
+            </div>
+
+            <div className="flex items-start gap-2 bg-[#edf2ff] border border-[#dbe4ff] rounded-[10px] px-3 py-2.5">
+              <span className="text-sm flex-shrink-0 leading-none mt-0.5">💡</span>
+              <p className="text-[#3b5bdb] text-xs leading-relaxed">
+                We&apos;ll never block a student automatically — you always click [Block student] yourself. This only makes the reminder louder.
+              </p>
             </div>
           </div>
 

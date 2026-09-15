@@ -24,7 +24,7 @@ export interface AddStudentModalProps {
   tutorMonthlyDueDate: number | null
 }
 
-type ClassType = 'individual' | 'batch' | 'trial'
+type ClassType = 'individual' | 'group' | 'trial'
 type PaymentStatusChoice = 'not_paid' | 'paid' | 'not_applicable'
 
 
@@ -200,9 +200,9 @@ export default function AddStudentModal({
 
   const uniqueSubjects = Array.from(new Set(tutorSubjects.map(s => s.subject)))
 
-  // When class type is batch, only show subjects that actually have batches
+  // When class type is group, only show subjects that actually have batches
   const subjectsWithBatches = Array.from(new Set(tutorBatches.map(b => b.subject)))
-  const subjectsForDropdown = classType === 'batch' ? subjectsWithBatches : uniqueSubjects
+  const subjectsForDropdown = classType === 'group' ? subjectsWithBatches : uniqueSubjects
 
   const gradesForSubject: string[] = subject
     ? tutorSubjects
@@ -238,7 +238,7 @@ export default function AddStudentModal({
     // Group/Batch — requires at least one active batch for the subject
     // (grade is not required for batches — they're subject-level)
     if (batchesForSubject.length > 0) {
-      opts.push({ value: 'batch', label: 'Group' })
+      opts.push({ value: 'group', label: 'Group' })
     }
 
     // Trial — requires individual trial type set to free or paid
@@ -255,7 +255,7 @@ export default function AddStudentModal({
   const suggestions = useMemo(() => {
     if (!subject) return []
 
-    if (classType === 'batch') {
+    if (classType === 'group') {
       // Batch suggestions come from the selected batch or all batches for subject
       const relevantBatches = batchId
         ? tutorBatches.filter(b => b.id === batchId)
@@ -299,7 +299,7 @@ export default function AddStudentModal({
     if (!subject) { setFee(''); return }
 
     // Batch fee comes from the DB batches list — grade is not required
-    if (classType === 'batch') {
+    if (classType === 'group') {
       const selectedBatch = batchId ? tutorBatches.find(b => b.id === batchId) : null
       if (selectedBatch?.monthly_fee) {
         setFee(String(selectedBatch.monthly_fee))
@@ -339,7 +339,7 @@ export default function AddStudentModal({
 
   // When switching to batch mode, clear subject if that subject has no batches
   useEffect(() => {
-    if (classType === 'batch' && subject && !subjectsWithBatches.includes(subject)) {
+    if (classType === 'group' && subject && !subjectsWithBatches.includes(subject)) {
       setSubject('')
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -461,7 +461,7 @@ export default function AddStudentModal({
           grade,
           class_type:    classType,
           monthly_fee:   fee ? parseInt(fee) || 0 : 0,
-          batch_id:      (classType === 'batch' && batchId) ? batchId : null,
+          batch_id:      (classType === 'group' && batchId) ? batchId : null,
           status:        'active',
           consent_given: false,
           created_at:    new Date().toISOString(),
@@ -481,8 +481,11 @@ export default function AddStudentModal({
           scheduled_at:   `${nextDate}T${nextTime}`,
           status:         'scheduled',
           payment_status: payStatus === 'paid' ? 'paid' : 'pending',
-          session_type:   classType === 'batch' ? 'batch' : 'individual',
-          batch_id:       (classType === 'batch' && batchId) ? batchId : null,
+          // sessions.session_type is a separate 'individual' | 'batch' domain
+          // from students.class_type ('individual' | 'group' | 'trial') —
+          // the literal 'batch' here is intentional and correct.
+          session_type:   classType === 'group' ? 'batch' : 'individual',
+          batch_id:       (classType === 'group' && batchId) ? batchId : null,
         })
       }
 
@@ -745,7 +748,7 @@ export default function AddStudentModal({
                   )}
 
                   {/* Group selector (shown when Group selected and groups exist for subject) */}
-                  {classType === 'batch' && batchesForSubject.length > 0 && (
+                  {classType === 'group' && batchesForSubject.length > 0 && (
                     <div className="mt-3">
                       <label htmlFor="asm-batch" className={labelCls}>
                         Group

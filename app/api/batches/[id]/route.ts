@@ -88,6 +88,26 @@ export async function PATCH(
     }
   }
 
+  // Archiving (or any status change away from 'active') gets the SAME guard
+  // DELETE already has — without this, a tutor could silently orphan active,
+  // paying students via PATCH status while DELETE correctly blocks the
+  // equivalent action.
+  if (updates.status !== undefined && updates.status !== 'active') {
+    const { count: activeCount } = await supabase
+      .from('students')
+      .select('id', { count: 'exact', head: true })
+      .eq('batch_id', batchId)
+      .eq('class_type', 'group')
+      .eq('status', 'active')
+
+    if (activeCount && activeCount > 0) {
+      return NextResponse.json(
+        { error: `Cannot archive — ${activeCount} active student${activeCount === 1 ? '' : 's'} enrolled. Move or deactivate them first.` },
+        { status: 409 },
+      )
+    }
+  }
+
   const { data: updated, error: updateErr } = await supabase
     .from('batches')
     .update(updates)
@@ -99,6 +119,23 @@ export async function PATCH(
   if (updateErr || !updated) {
     console.error('[batches] Failed to update batch:', updateErr)
     return NextResponse.json({ error: 'Failed to update batch' }, { status: 500 })
+  }
+
+  // Schedule changed — future sessions already generated for the OLD
+  // day/time (and their OLD zoom_link, copied at generation time) would
+  // otherwise sit there silently forever. Cancel them; generateBatchSessions()
+  // will create correct ones at the NEW day/time on its next run.
+  if (dayChanged || timeChanged) {
+    const { error: cancelErr } = await supabase
+      .from('sessions')
+      .update({ status: 'cancelled', cancelled_reason: 'Batch schedule changed' })
+      .eq('batch_id', batchId)
+      .eq('status', 'scheduled')
+      .gte('scheduled_at', new Date().toISOString())
+
+    if (cancelErr) {
+      console.error('[batches] Failed to cancel stale sessions after schedule change (batch itself was updated):', cancelErr)
+    }
   }
 
   return NextResponse.json({ batch: updated })

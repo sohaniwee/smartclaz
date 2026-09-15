@@ -19,8 +19,10 @@ type NotifPrefs   = Record<string, NotifChannel>
 
 type Errors = {
   whatsapp?: string
-  reschedule?: string
-  noshow?: string
+  rescheduleIndividual?: string
+  rescheduleGroup?: string
+  noshowIndividual?: string
+  noshowGroup?: string
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -129,53 +131,6 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   )
 }
 
-function RadioCard({
-  label,
-  desc,
-  selected,
-  onClick,
-  recommended,
-}: {
-  label: string
-  desc: string
-  selected: boolean
-  onClick: () => void
-  recommended?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`w-full text-left p-3.5 rounded-[10px] border-[1.5px] transition-all duration-150 ${
-        selected
-          ? 'border-[#3b5bdb] bg-[#edf2ff]'
-          : 'border-[#dee2e6] bg-white hover:border-[#748ffc] hover:bg-[#f8f9ff]'
-      }`}
-    >
-      <div className="flex items-start gap-2.5">
-        <div
-          className={`mt-0.5 w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
-            selected ? 'border-[#3b5bdb]' : 'border-[#ced4da]'
-          }`}
-        >
-          {selected && (
-            <div className="w-2 h-2 rounded-full bg-[#3b5bdb]" />
-          )}
-        </div>
-        <div>
-          <span className="text-sm font-semibold text-[#1a1a2e]">{label}</span>
-          {recommended && (
-            <span className="ml-2 text-[0.6rem] font-bold text-[#3b5bdb] bg-[#dbe4ff] px-1.5 py-0.5 rounded-full">
-              Recommended
-            </span>
-          )}
-          <p className="text-xs text-[#6c757d] mt-0.5 leading-relaxed">{desc}</p>
-        </div>
-      </div>
-    </button>
-  )
-}
-
 // ── Page ───────────────────────────────────────────────────────────────────
 
 export default function PreferencesPage() {
@@ -189,16 +144,19 @@ export default function PreferencesPage() {
   const [waNumber,  setWaNumber ] = useState('')
   const [waCountry, setWaCountry] = useState(DEFAULT_COUNTRY.code)
 
-  // Reschedule policy
-  // stored values: 'none' | 'auto_24h' | 'auto_48h' | custom text
-  type RescheduleOption = 'none' | 'auto_24h' | 'auto_48h' | 'custom'
-  const [rescheduleOpt,    setRescheduleOpt   ] = useState<RescheduleOption>('auto_24h')
-  const [rescheduleCustom, setRescheduleCustom] = useState('')
+  // Teaching style — which policy box(es) to show. Set during signup/classes;
+  // defaults to 'individual' until loaded so nothing flashes both boxes.
+  const [teachingStyle, setTeachingStyle] = useState<'individual' | 'group' | 'both'>('individual')
 
-  // No-show policy
-  type NoshowOption = 'forfeit' | 'reschedule' | 'custom'
-  const [noshowOpt,    setNoshowOpt   ] = useState<NoshowOption>('forfeit')
-  const [noshowCustom, setNoshowCustom] = useState('')
+  // Reschedule / no-show policy — freeform text, split by class type since
+  // there's no self-service slot picker: a tutor always confirms individual
+  // reschedules manually, and a batch has one fixed weekly slot with no
+  // per-student reschedule at all. One combined field can't say both things
+  // honestly, so each teaching mode gets its own text.
+  const [reschedulePolicyIndividual, setReschedulePolicyIndividual] = useState('')
+  const [reschedulePolicyGroup,      setReschedulePolicyGroup     ] = useState('')
+  const [noshowPolicyIndividual,     setNoshowPolicyIndividual    ] = useState('')
+  const [noshowPolicyGroup,          setNoshowPolicyGroup         ] = useState('')
 
   // Notifications
   const [notifs, setNotifs] = useState<NotifPrefs>(defaultNotifs())
@@ -213,8 +171,12 @@ export default function PreferencesPage() {
   // Runs after every state update; skipped during initial data loading.
   useEffect(() => {
     if (!dataLoaded.current) return
-    saveDraft({ waNumber, waCountry, rescheduleOpt, rescheduleCustom, noshowOpt, noshowCustom, notifs })
-  }, [waNumber, waCountry, rescheduleOpt, rescheduleCustom, noshowOpt, noshowCustom, notifs])
+    saveDraft({
+      waNumber, waCountry, notifs,
+      reschedulePolicyIndividual, reschedulePolicyGroup,
+      noshowPolicyIndividual, noshowPolicyGroup,
+    })
+  }, [waNumber, waCountry, notifs, reschedulePolicyIndividual, reschedulePolicyGroup, noshowPolicyIndividual, noshowPolicyGroup])
 
   // ── Auth + load saved data ──────────────────────────────────────────
 
@@ -226,7 +188,7 @@ export default function PreferencesPage() {
 
       const { data } = await supabase
         .from('tutors')
-        .select('phone, whatsapp_number, reschedule_policy, noshow_policy, notification_prefs')
+        .select('phone, whatsapp_number, teaching_style, reschedule_policy_individual, reschedule_policy_group, noshow_policy_individual, noshow_policy_group, notification_prefs')
         .eq('id', user.id)
         .single()
 
@@ -235,11 +197,11 @@ export default function PreferencesPage() {
       try { draft = JSON.parse(sessionStorage.getItem(PREFS_DRAFT_KEY) ?? '{}') } catch { /* ignore */ }
 
       if (draft.waNumber) { setWaNumber(draft.waNumber as string); setWaCountry((draft.waCountry as string) ?? DEFAULT_COUNTRY.code) }
-      if (draft.rescheduleOpt)    setRescheduleOpt(draft.rescheduleOpt as RescheduleOption)
-      if (draft.rescheduleCustom) setRescheduleCustom(draft.rescheduleCustom as string)
-      if (draft.noshowOpt)        setNoshowOpt(draft.noshowOpt as NoshowOption)
-      if (draft.noshowCustom)     setNoshowCustom(draft.noshowCustom as string)
-      if (draft.notifs)           setNotifs(draft.notifs as NotifPrefs)
+      if (draft.reschedulePolicyIndividual) setReschedulePolicyIndividual(draft.reschedulePolicyIndividual as string)
+      if (draft.reschedulePolicyGroup)      setReschedulePolicyGroup(draft.reschedulePolicyGroup as string)
+      if (draft.noshowPolicyIndividual)     setNoshowPolicyIndividual(draft.noshowPolicyIndividual as string)
+      if (draft.noshowPolicyGroup)          setNoshowPolicyGroup(draft.noshowPolicyGroup as string)
+      if (draft.notifs)                     setNotifs(draft.notifs as NotifPrefs)
 
       if (data) {
         if (data.phone) setLoginPhone(data.phone)
@@ -254,25 +216,14 @@ export default function PreferencesPage() {
           }
         }
 
-        if (data.reschedule_policy) {
-          const p = data.reschedule_policy as string
-          if (p === 'none' || p === 'auto_24h' || p === 'auto_48h') {
-            setRescheduleOpt(p)
-          } else {
-            setRescheduleOpt('custom')
-            setRescheduleCustom(p)
-          }
+        if (data.teaching_style === 'individual' || data.teaching_style === 'group' || data.teaching_style === 'both') {
+          setTeachingStyle(data.teaching_style)
         }
 
-        if (data.noshow_policy) {
-          const p = data.noshow_policy as string
-          if (p === 'forfeit' || p === 'reschedule') {
-            setNoshowOpt(p as NoshowOption)
-          } else {
-            setNoshowOpt('custom')
-            setNoshowCustom(p)
-          }
-        }
+        if (data.reschedule_policy_individual) setReschedulePolicyIndividual(data.reschedule_policy_individual)
+        if (data.reschedule_policy_group)      setReschedulePolicyGroup(data.reschedule_policy_group)
+        if (data.noshow_policy_individual)     setNoshowPolicyIndividual(data.noshow_policy_individual)
+        if (data.noshow_policy_group)          setNoshowPolicyGroup(data.noshow_policy_group)
 
         if (data.notification_prefs && typeof data.notification_prefs === 'object') {
           const prefs = data.notification_prefs as Record<string, unknown>
@@ -297,11 +248,20 @@ export default function PreferencesPage() {
     if (phoneErr) errs.whatsapp = phoneErr
     else if (!waNumber) errs.whatsapp = 'WhatsApp number is required'
 
-    if (rescheduleOpt === 'custom' && !rescheduleCustom.trim()) {
-      errs.reschedule = 'Please enter your reschedule policy'
+    const showIndividual = teachingStyle === 'individual' || teachingStyle === 'both'
+    const showGroup      = teachingStyle === 'group' || teachingStyle === 'both'
+
+    if (showIndividual && !reschedulePolicyIndividual.trim()) {
+      errs.rescheduleIndividual = 'Please enter your reschedule policy for individual classes'
     }
-    if (noshowOpt === 'custom' && !noshowCustom.trim()) {
-      errs.noshow = 'Please enter your no-show policy'
+    if (showGroup && !reschedulePolicyGroup.trim()) {
+      errs.rescheduleGroup = 'Please enter your reschedule policy for batch classes'
+    }
+    if (showIndividual && !noshowPolicyIndividual.trim()) {
+      errs.noshowIndividual = 'Please enter your no-show policy for individual classes'
+    }
+    if (showGroup && !noshowPolicyGroup.trim()) {
+      errs.noshowGroup = 'Please enter your no-show policy for batch classes'
     }
     return errs
   }
@@ -321,24 +281,18 @@ export default function PreferencesPage() {
     const country    = findCountry(waCountry)
     const fullPhone  = `${country.dialCode}${waNumber}`
 
-    const reschedulePolicy = rescheduleOpt === 'custom'
-      ? rescheduleCustom.trim()
-      : rescheduleOpt
-
-    const noshowPolicy = noshowOpt === 'custom'
-      ? noshowCustom.trim()
-      : noshowOpt
-
     const notifPrefs = { events: notifs }
 
     const { error: updateErr } = await supabase
       .from('tutors')
       .update({
-        whatsapp_number:   fullPhone,
-        reschedule_policy: reschedulePolicy,
-        noshow_policy:     noshowPolicy,
-        notification_prefs: notifPrefs,
-        status:            'active',
+        whatsapp_number:              fullPhone,
+        reschedule_policy_individual: reschedulePolicyIndividual.trim(),
+        reschedule_policy_group:      reschedulePolicyGroup.trim(),
+        noshow_policy_individual:     noshowPolicyIndividual.trim(),
+        noshow_policy_group:          noshowPolicyGroup.trim(),
+        notification_prefs:           notifPrefs,
+        status:                       'active',
       })
       .eq('id', userId!)
 
@@ -459,53 +413,57 @@ export default function PreferencesPage() {
           <div>
             <SectionHeading icon={RotateCcw}>Reschedule Policy</SectionHeading>
             <p className="text-[#6c757d] text-xs mb-3">
-              This is shared with students when they book. What&apos;s your reschedule policy?
+              This is shared with students when they book. Rescheduling is always confirmed
+              by you manually — there&apos;s no self-service time picker, so write what
+              actually happens when a student asks.
             </p>
-            <div className="space-y-2">
-              <RadioCard
-                label="No rescheduling allowed"
-                desc="Classes cannot be rescheduled once booked"
-                selected={rescheduleOpt === 'none'}
-                onClick={() => setRescheduleOpt('none')}
-              />
-              <RadioCard
-                label="24 hours notice required"
-                desc="Students can reschedule if they give at least 24 hours notice"
-                selected={rescheduleOpt === 'auto_24h'}
-                onClick={() => setRescheduleOpt('auto_24h')}
-                recommended
-              />
-              <RadioCard
-                label="48 hours notice required"
-                desc="Stricter — 2 day advance notice required to reschedule"
-                selected={rescheduleOpt === 'auto_48h'}
-                onClick={() => setRescheduleOpt('auto_48h')}
-              />
-              <RadioCard
-                label="Custom policy"
-                desc="Write your own reschedule rules"
-                selected={rescheduleOpt === 'custom'}
-                onClick={() => setRescheduleOpt('custom')}
-              />
-            </div>
-            {rescheduleOpt === 'custom' && (
-              <div className="mt-3">
+
+            {(teachingStyle === 'individual' || teachingStyle === 'both') && (
+              <div className="mb-4">
+                <label className="block text-[#343a40] text-xs font-bold mb-1.5">
+                  Individual classes
+                </label>
                 <textarea
-                  placeholder="e.g. Students must request reschedule at least 24 hours before the class and it will be reviewed case by case."
-                  value={rescheduleCustom}
+                  placeholder="e.g. Message at least 24 hours before your class to request a reschedule. I'll confirm a new time within 24 hours based on my availability that week."
+                  value={reschedulePolicyIndividual}
                   onChange={e => {
-                    setRescheduleCustom(e.target.value)
-                    if (errors.reschedule) setErrors(p => ({ ...p, reschedule: undefined }))
+                    setReschedulePolicyIndividual(e.target.value)
+                    if (errors.rescheduleIndividual) setErrors(p => ({ ...p, rescheduleIndividual: undefined }))
                   }}
                   rows={3}
                   className={`w-full border rounded-[10px] px-3 py-[9px] text-sm text-[#1a1a2e] placeholder:text-[#adb5bd] outline-none transition-all resize-none ${
-                    errors.reschedule
+                    errors.rescheduleIndividual
                       ? 'border-[#c92a2a] bg-[#fff5f5] focus:border-[#c92a2a] focus:ring-[3px] focus:ring-[rgba(201,42,42,0.12)]'
                       : 'border-[#ced4da] focus:border-[#3b5bdb] focus:ring-[3px] focus:ring-[rgba(59,91,219,0.12)]'
                   }`}
                 />
-                {errors.reschedule && (
-                  <p className="mt-1.5 text-[#c92a2a] text-xs">{errors.reschedule}</p>
+                {errors.rescheduleIndividual && (
+                  <p className="mt-1.5 text-[#c92a2a] text-xs">{errors.rescheduleIndividual}</p>
+                )}
+              </div>
+            )}
+
+            {(teachingStyle === 'group' || teachingStyle === 'both') && (
+              <div>
+                <label className="block text-[#343a40] text-xs font-bold mb-1.5">
+                  Batch classes
+                </label>
+                <textarea
+                  placeholder="e.g. Batch classes can't be rescheduled individually — if you miss one, join the next session as a catch-up."
+                  value={reschedulePolicyGroup}
+                  onChange={e => {
+                    setReschedulePolicyGroup(e.target.value)
+                    if (errors.rescheduleGroup) setErrors(p => ({ ...p, rescheduleGroup: undefined }))
+                  }}
+                  rows={3}
+                  className={`w-full border rounded-[10px] px-3 py-[9px] text-sm text-[#1a1a2e] placeholder:text-[#adb5bd] outline-none transition-all resize-none ${
+                    errors.rescheduleGroup
+                      ? 'border-[#c92a2a] bg-[#fff5f5] focus:border-[#c92a2a] focus:ring-[3px] focus:ring-[rgba(201,42,42,0.12)]'
+                      : 'border-[#ced4da] focus:border-[#3b5bdb] focus:ring-[3px] focus:ring-[rgba(59,91,219,0.12)]'
+                  }`}
+                />
+                {errors.rescheduleGroup && (
+                  <p className="mt-1.5 text-[#c92a2a] text-xs">{errors.rescheduleGroup}</p>
                 )}
               </div>
             )}
@@ -517,44 +475,53 @@ export default function PreferencesPage() {
             <p className="text-[#6c757d] text-xs mb-3">
               What happens if a student misses a class without notice?
             </p>
-            <div className="space-y-2">
-              <RadioCard
-                label="Class is forfeited"
-                desc="Unattended sessions count as used — no refund or makeup class"
-                selected={noshowOpt === 'forfeit'}
-                onClick={() => setNoshowOpt('forfeit')}
-              />
-              <RadioCard
-                label="One makeup class allowed per month"
-                desc="Automatically offers one makeup slot for no-shows"
-                selected={noshowOpt === 'reschedule'}
-                onClick={() => setNoshowOpt('reschedule')}
-              />
-              <RadioCard
-                label="Custom policy"
-                desc="Write your own no-show rules"
-                selected={noshowOpt === 'custom'}
-                onClick={() => setNoshowOpt('custom')}
-              />
-            </div>
-            {noshowOpt === 'custom' && (
-              <div className="mt-3">
+
+            {(teachingStyle === 'individual' || teachingStyle === 'both') && (
+              <div className="mb-4">
+                <label className="block text-[#343a40] text-xs font-bold mb-1.5">
+                  Individual classes
+                </label>
                 <textarea
-                  placeholder="e.g. First no-show per month gets a makeup class. Subsequent no-shows forfeit the session."
-                  value={noshowCustom}
+                  placeholder="e.g. If you don't show up without notice, the class is forfeited — message me to arrange a makeup at my discretion."
+                  value={noshowPolicyIndividual}
                   onChange={e => {
-                    setNoshowCustom(e.target.value)
-                    if (errors.noshow) setErrors(p => ({ ...p, noshow: undefined }))
+                    setNoshowPolicyIndividual(e.target.value)
+                    if (errors.noshowIndividual) setErrors(p => ({ ...p, noshowIndividual: undefined }))
                   }}
                   rows={3}
                   className={`w-full border rounded-[10px] px-3 py-[9px] text-sm text-[#1a1a2e] placeholder:text-[#adb5bd] outline-none transition-all resize-none ${
-                    errors.noshow
+                    errors.noshowIndividual
                       ? 'border-[#c92a2a] bg-[#fff5f5] focus:border-[#c92a2a] focus:ring-[3px] focus:ring-[rgba(201,42,42,0.12)]'
                       : 'border-[#ced4da] focus:border-[#3b5bdb] focus:ring-[3px] focus:ring-[rgba(59,91,219,0.12)]'
                   }`}
                 />
-                {errors.noshow && (
-                  <p className="mt-1.5 text-[#c92a2a] text-xs">{errors.noshow}</p>
+                {errors.noshowIndividual && (
+                  <p className="mt-1.5 text-[#c92a2a] text-xs">{errors.noshowIndividual}</p>
+                )}
+              </div>
+            )}
+
+            {(teachingStyle === 'group' || teachingStyle === 'both') && (
+              <div>
+                <label className="block text-[#343a40] text-xs font-bold mb-1.5">
+                  Batch classes
+                </label>
+                <textarea
+                  placeholder="e.g. Group sessions can't be rescheduled for a single no-show — the next session is your catch-up."
+                  value={noshowPolicyGroup}
+                  onChange={e => {
+                    setNoshowPolicyGroup(e.target.value)
+                    if (errors.noshowGroup) setErrors(p => ({ ...p, noshowGroup: undefined }))
+                  }}
+                  rows={3}
+                  className={`w-full border rounded-[10px] px-3 py-[9px] text-sm text-[#1a1a2e] placeholder:text-[#adb5bd] outline-none transition-all resize-none ${
+                    errors.noshowGroup
+                      ? 'border-[#c92a2a] bg-[#fff5f5] focus:border-[#c92a2a] focus:ring-[3px] focus:ring-[rgba(201,42,42,0.12)]'
+                      : 'border-[#ced4da] focus:border-[#3b5bdb] focus:ring-[3px] focus:ring-[rgba(59,91,219,0.12)]'
+                  }`}
+                />
+                {errors.noshowGroup && (
+                  <p className="mt-1.5 text-[#c92a2a] text-xs">{errors.noshowGroup}</p>
                 )}
               </div>
             )}

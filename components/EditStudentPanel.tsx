@@ -18,7 +18,7 @@ export interface EditableStudent {
   parent_whatsapp?: string
   subject: string
   grade: string
-  class_type: 'individual' | 'batch' | 'trial'
+  class_type: 'individual' | 'group' | 'trial'
   batch_id?: string
   batch_name?: string
   monthly_fee: number
@@ -279,7 +279,7 @@ export default function EditStudentPanel({
   const [phoneChanged, setPhoneChanged] = useState(false)
   const [subject, setSubject]           = useState(student.subject)
   const [grade, setGrade]               = useState(student.grade)
-  const [classType, setClassType]       = useState<'individual' | 'batch' | 'trial'>(student.class_type)
+  const [classType, setClassType]       = useState<'individual' | 'group' | 'trial'>(student.class_type)
   const [batchId, setBatchId]           = useState(student.batch_id ?? '')
   const [fee, setFee]                   = useState(String(student.monthly_fee))
   const [statusDraft, setStatusDraft]   = useState<'active' | 'inactive' | 'blocked'>(student.status)
@@ -369,7 +369,7 @@ export default function EditStudentPanel({
       ?.grades.find(g => g.grade === grade)
     if (!gc) return null
     if (classType === 'individual') return gc.individual_fee || null
-    if (classType === 'batch') {
+    if (classType === 'group') {
       const b = batchId
         ? gc.batches?.find(b => b.id === batchId)
         : gc.batches?.[0]
@@ -415,7 +415,7 @@ export default function EditStudentPanel({
         subject,
         grade,
         class_type: classType,
-        batch_id: classType === 'batch' && batchId ? batchId : null,
+        batch_id: classType === 'group' && batchId ? batchId : null,
         monthly_fee: parseInt(fee) || 0,
         status: statusDraft,
       }
@@ -466,7 +466,7 @@ export default function EditStudentPanel({
         subject,
         grade,
         class_type: classType,
-        batch_id: classType === 'batch' && batchId ? batchId : undefined,
+        batch_id: classType === 'group' && batchId ? batchId : undefined,
         monthly_fee: parseInt(fee) || 0,
         status: statusDraft,
         current_payment_status: localPayStatus,
@@ -671,10 +671,10 @@ export default function EditStudentPanel({
                 </div>
 
                 {classTypeUnlocked ? (
-                  <PillRadio<'individual' | 'batch' | 'trial'>
+                  <PillRadio<'individual' | 'group' | 'trial'>
                     options={[
                       { value: 'individual', label: 'Individual' },
-                      { value: 'batch',      label: 'Group' },
+                      { value: 'group',      label: 'Group' },
                       { value: 'trial',      label: 'Trial' },
                     ]}
                     value={classType}
@@ -682,11 +682,11 @@ export default function EditStudentPanel({
                   />
                 ) : (
                   <div className="inline-flex items-center px-4 py-1.5 rounded-full text-[0.78rem] font-semibold border bg-[#3b5bdb] text-white border-[#3b5bdb] shadow-[0_2px_8px_rgba(59,91,219,0.22)]">
-                    {classType === 'individual' ? 'Individual' : classType === 'batch' ? 'Group' : 'Trial'}
+                    {classType === 'individual' ? 'Individual' : classType === 'group' ? 'Group' : 'Trial'}
                   </div>
                 )}
 
-                {classType === 'batch' && batchesForSubject.length > 0 && (
+                {classType === 'group' && batchesForSubject.length > 0 && (
                   <div className="mt-3">
                     <label className={labelCls}>Group / Batch</label>
                     <select
