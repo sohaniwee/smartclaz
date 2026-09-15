@@ -149,23 +149,22 @@ function convertFromDB(saved: SubjectEntry[]): SubjectDraft[] {
   }))
 }
 
-// ── Validation ────────────────────────────────────────────────────────────────
+// ── Slot collection (shared by inline "Add slot" checks and submit validation) ─
 
-function validate(drafts: SubjectDraft[]): Record<string, string> {
-  const errors: Record<string, string> = {}
-  if (drafts.length === 0) {
-    errors.subjects = 'Select at least one subject'
-    return errors
-  }
+// Collect all individual slots across all subjects/grades for conflict checking
+type SlotRef = { subjectName: string; gradeName: string; label: string; day: string; time: string }
+// Collect all batch slots for conflict checking
+type BatchSlotRef = { subjectName: string; gradeName: string; batchName: string; day: string; time: string; draftId: string }
 
-  // Collect all individual slots across all subjects/grades for conflict checking
-  type SlotRef = { subjectName: string; gradeName: string; label: string; day: string; time: string }
-  const allIndividualSlots: SlotRef[] = []
+function collectAllSlots(drafts: SubjectDraft[]): { individualSlots: SlotRef[]; batchSlots: BatchSlotRef[] } {
+  const individualSlots: SlotRef[] = []
+  const batchSlots: BatchSlotRef[] = []
+
   for (const s of drafts) {
     for (const g of s.grades) {
       if (g.has_individual) {
         for (const slot of g.individual_slots) {
-          allIndividualSlots.push({
+          individualSlots.push({
             subjectName: s.subject,
             gradeName: g.grade,
             label: `${s.subject} ${g.grade} individual`,
@@ -174,18 +173,10 @@ function validate(drafts: SubjectDraft[]): Record<string, string> {
           })
         }
       }
-    }
-  }
-
-  // Collect all batch slots for conflict checking
-  type BatchSlotRef = { subjectName: string; gradeName: string; batchName: string; day: string; time: string; draftId: string }
-  const allBatchSlots: BatchSlotRef[] = []
-  for (const s of drafts) {
-    for (const g of s.grades) {
       if (g.has_group) {
         for (const b of g.batches) {
           if (b.day && b.time) {
-            allBatchSlots.push({
+            batchSlots.push({
               subjectName: s.subject,
               gradeName: g.grade,
               batchName: b.name.trim() || `Batch`,
@@ -198,6 +189,20 @@ function validate(drafts: SubjectDraft[]): Record<string, string> {
       }
     }
   }
+
+  return { individualSlots, batchSlots }
+}
+
+// ── Validation ────────────────────────────────────────────────────────────────
+
+function validate(drafts: SubjectDraft[]): Record<string, string> {
+  const errors: Record<string, string> = {}
+  if (drafts.length === 0) {
+    errors.subjects = 'Select at least one subject'
+    return errors
+  }
+
+  const { individualSlots: allIndividualSlots, batchSlots: allBatchSlots } = collectAllSlots(drafts)
 
   for (const s of drafts) {
     if (s.grades.length === 0) {
@@ -294,6 +299,28 @@ function validate(drafts: SubjectDraft[]): Record<string, string> {
           errors[`${s.subject}_${g.grade}_trial_fee`] = 'Trial fee required'
         if (g.individual_slots.length === 0)
           errors[`${s.subject}_${g.grade}_slots`] = 'Add at least one availability slot'
+        else {
+          // Same day+time reused elsewhere — another subject/grade's
+          // individual slots, or a batch — would double-book the tutor.
+          for (const slot of g.individual_slots) {
+            const conflictingIndividual = allIndividualSlots.find(
+              ref =>
+                !(ref.subjectName === s.subject && ref.gradeName === g.grade) &&
+                ref.day === slot.day && ref.time === slot.time
+            )
+            const conflictingBatch = !conflictingIndividual && allBatchSlots.find(
+              ref => ref.day === slot.day && ref.time === slot.time
+            )
+            const conflict = conflictingIndividual || conflictingBatch
+            if (conflict) {
+              const timeLabel = TIME_OPTIONS.find(t => t.value === slot.time)?.label ?? slot.time
+              const label = 'batchName' in conflict ? conflict.batchName : conflict.label
+              errors[`${s.subject}_${g.grade}_slot_conflict`] =
+                `You already have a class on ${slot.day} at ${timeLabel}: ${label}`
+              break
+            }
+          }
+        }
       }
     }
   }
@@ -641,12 +668,16 @@ const GradeSection = ({
   errors,
   onUpdate,
   onRemove,
+  allIndividualSlots,
+  allBatchSlots,
 }: {
   subjectName: string
   grade: GradeDraft
   errors: Record<string, string>
   onUpdate: (updater: (g: GradeDraft) => GradeDraft) => void
   onRemove: () => void
+  allIndividualSlots: SlotRef[]
+  allBatchSlots: BatchSlotRef[]
 }) => {
   const [slotDay, setSlotDay] = useState('')
   const [slotTime, setSlotTime] = useState('')
@@ -660,6 +691,27 @@ const GradeSection = ({
     if (!slotTime) { setSlotErr('Select a time'); return }
     const dup = grade.individual_slots.some(s => s.day === slotDay && s.time === slotTime)
     if (dup) { setSlotErr('That slot already exists'); return }
+
+    const timeLabel = TIME_OPTIONS.find(t => t.value === slotTime)?.label ?? slotTime
+
+    // Same day+time already used by another subject/grade's individual slots
+    const conflictingIndividual = allIndividualSlots.find(
+      ref =>
+        !(ref.subjectName === subjectName && ref.gradeName === grade.grade) &&
+        ref.day === slotDay && ref.time === slotTime
+    )
+    if (conflictingIndividual) {
+      setSlotErr(`You already have a class on ${slotDay} at ${timeLabel}: ${conflictingIndividual.label}`)
+      return
+    }
+
+    // Same day+time already used by a batch class
+    const conflictingBatch = allBatchSlots.find(ref => ref.day === slotDay && ref.time === slotTime)
+    if (conflictingBatch) {
+      setSlotErr(`You already have a class on ${slotDay} at ${timeLabel}: ${conflictingBatch.batchName}`)
+      return
+    }
+
     setSlotErr('')
     onUpdate(g => ({
       ...g,
@@ -864,6 +916,9 @@ const GradeSection = ({
                   {errors[`${gradeKey}_slots`] && (
                     <p className="mb-2 text-[#c92a2a] text-xs" data-error>{errors[`${gradeKey}_slots`]}</p>
                   )}
+                  {errors[`${gradeKey}_slot_conflict`] && (
+                    <p className="mb-2 text-[#c92a2a] text-xs" data-error>{errors[`${gradeKey}_slot_conflict`]}</p>
+                  )}
 
                   {/* Add slot row */}
                   <div className="flex gap-1.5 items-end">
@@ -965,6 +1020,8 @@ const SubjectSection = ({
   onSetActiveGrade,
   onRemove,
   onUpdate,
+  allIndividualSlots,
+  allBatchSlots,
 }: {
   entry: SubjectDraft
   errors: Record<string, string>
@@ -974,6 +1031,8 @@ const SubjectSection = ({
   onSetActiveGrade: (g: string) => void
   onRemove: () => void
   onUpdate: (updater: (s: SubjectDraft) => SubjectDraft) => void
+  allIndividualSlots: SlotRef[]
+  allBatchSlots: BatchSlotRef[]
 }) => {
   const toggleGrade = (grade: string) => {
     onUpdate(s => {
@@ -1202,6 +1261,8 @@ const SubjectSection = ({
                       }))
                     }
                     onRemove={() => toggleGrade(activeGradeData.grade)}
+                    allIndividualSlots={allIndividualSlots}
+                    allBatchSlots={allBatchSlots}
                   />
                 </div>
               ) : (
@@ -1297,6 +1358,7 @@ export default function ClassesPage() {
   // ── Handlers ──────────────────────────────────────────────────────────
 
   const selectedSubjectNames = subjectDrafts.map(s => s.subject)
+  const { individualSlots: allIndividualSlots, batchSlots: allBatchSlots } = collectAllSlots(subjectDrafts)
 
   function toggleSubject(subject: string) {
     setSubjectDrafts(prev => {
@@ -1583,6 +1645,8 @@ export default function ClassesPage() {
                   }
                   onRemove={() => toggleSubject(entry.subject)}
                   onUpdate={updater => updateSubject(entry.subject, updater)}
+                  allIndividualSlots={allIndividualSlots}
+                  allBatchSlots={allBatchSlots}
                 />
               ))}
             </div>
