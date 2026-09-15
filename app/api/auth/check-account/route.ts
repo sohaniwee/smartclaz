@@ -44,28 +44,40 @@ export async function POST(req: NextRequest) {
   }
 
   const identifier = email ?? phone!
-  const { limited, retryAfterSecs } = await checkRateLimit(identifier, 'otp_send')
-  if (limited) {
-    return NextResponse.json(
-      { error: `Too many requests. Please try again in ${Math.ceil(retryAfterSecs / 60)} minute(s).` },
-      { status: 429 },
-    )
+  try {
+    const { limited, retryAfterSecs } = await checkRateLimit(identifier, 'otp_send')
+    if (limited) {
+      return NextResponse.json(
+        { error: `Too many requests. Please try again in ${Math.ceil(retryAfterSecs / 60)} minute(s).` },
+        { status: 429 },
+      )
+    }
+    await incrementAttempts(identifier, 'otp_send')
+
+    const supabase = getServiceSupabase()
+    const query = supabase.from('tutors').select('id').limit(1)
+    const { data, error } = email
+      ? await query.eq('email', email).maybeSingle()
+      : await query.eq('phone', phone!).maybeSingle()
+
+    if (error) {
+      console.error('[check-account] Failed to query tutors:', error)
+      // Fail CLOSED — not open. This check exists specifically for the
+      // phantom-account case (a Supabase Auth user with no tutors row):
+      // sendEmailOTP/sendPhoneOTP's shouldCreateUser:false check does NOT
+      // catch that case, since Auth genuinely has a matching user. Failing
+      // open here would silently let the exact bug this route was built to
+      // prevent happen again whenever the query hiccups.
+      return NextResponse.json({ error: 'Could not verify account. Please try again.' }, { status: 503 })
+    }
+
+    return NextResponse.json({ exists: !!data })
+  } catch (err) {
+    // Same fail-closed reasoning as the query-error branch above, but also
+    // catches setup failures (e.g. missing SUPABASE_SERVICE_ROLE_KEY) that
+    // would otherwise throw before any query runs and surface as an opaque
+    // 500 with no logging.
+    console.error('[check-account] Unexpected failure:', err)
+    return NextResponse.json({ error: 'Could not verify account. Please try again.' }, { status: 503 })
   }
-  await incrementAttempts(identifier, 'otp_send')
-
-  const supabase = getServiceSupabase()
-  const query = supabase.from('tutors').select('id').limit(1)
-  const { data, error } = email
-    ? await query.eq('email', email).maybeSingle()
-    : await query.eq('phone', phone!).maybeSingle()
-
-  if (error) {
-    console.error('[check-account] Failed to query tutors:', error)
-    // Fail open on the check itself — worst case, sendEmailOTP/sendPhoneOTP's
-    // own shouldCreateUser: false check still catches a genuinely nonexistent
-    // account downstream.
-    return NextResponse.json({ exists: true })
-  }
-
-  return NextResponse.json({ exists: !!data })
 }

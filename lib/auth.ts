@@ -365,7 +365,11 @@ export async function sendPhoneOTP(phone: string): Promise<OtpResult> {
     })
 
     if (error) {
-      if (error.message.toLowerCase().includes('rate')) {
+      const msg = error.message.toLowerCase()
+      // Covers both "sms rate limit exceeded" and GoTrue's per-identifier
+      // resend cooldown ("For security purposes, you can only request this
+      // after N seconds").
+      if (msg.includes('rate') || msg.includes('security purposes')) {
         return { success: false, error: 'Too many OTP requests. Please wait before trying again.' }
       }
       // shouldCreateUser: false means Supabase rejects the send outright when
@@ -373,7 +377,7 @@ export async function sendPhoneOTP(phone: string): Promise<OtpResult> {
       // case is "Signups not allowed for otp". Surface that distinctly so
       // the tutor is told to sign up instead of just seeing a generic
       // "couldn't send" message with no OTP ever having gone out.
-      if (error.message.toLowerCase().includes('signups not allowed')) {
+      if (msg.includes('signups not allowed')) {
         logEvent(null, 'otp_failed')
         return { success: false, error: 'No account found with this phone number. Please sign up first.' }
       }
@@ -484,7 +488,12 @@ export async function sendEmailOTP(email: string, shouldCreateUser = true): Prom
     })
 
     if (error) {
-      if (error.message.toLowerCase().includes('rate')) {
+      const msg = error.message.toLowerCase()
+
+      // Covers both "email rate limit exceeded" and GoTrue's per-identifier
+      // resend cooldown ("For security purposes, you can only request this
+      // after N seconds") — neither implies anything about account existence.
+      if (msg.includes('rate') || msg.includes('security purposes')) {
         return {
           success: false,
           error: 'Too many OTP requests. Please wait before trying again.',
@@ -494,9 +503,25 @@ export async function sendEmailOTP(email: string, shouldCreateUser = true): Prom
       // shouldCreateUser: false (login) — Supabase rejects the send outright
       // when no account matches this email. GoTrue's stock error text for
       // this case is "Signups not allowed for otp".
-      if (!shouldCreateUser && error.message.toLowerCase().includes('signups not allowed')) {
+      if (!shouldCreateUser && msg.includes('signups not allowed')) {
         logEvent(null, 'otp_failed')
         return { success: false, error: 'No account found with this email. Please sign up first.' }
+      }
+
+      // "Error sending magic link/confirmation email" means Supabase's mail
+      // provider itself failed (quota, misconfigured SMTP, etc.) — this says
+      // nothing about whether the account exists, for either signup or login.
+      if (msg.includes('error sending')) {
+        logEvent(null, 'otp_failed')
+        return { success: false, error: 'Could not send the verification email right now. Please try again shortly.' }
+      }
+
+      if (!shouldCreateUser) {
+        // Login path — never claim "account exists" here; that's only a
+        // meaningful signal on the signup path below. Surface a generic,
+        // non-committal failure instead.
+        logEvent(null, 'otp_failed')
+        return { success: false, error: 'Could not send the verification code. Please try again.' }
       }
 
       // shouldCreateUser: true (signup/recovery) — any other error means the

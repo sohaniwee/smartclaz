@@ -182,15 +182,21 @@ function LoginInner() {
         setError(`No account found with this ${method === 'phone' ? 'phone number' : 'email'}. Please sign up first.`)
         return
       }
-      if (!checkRes.ok && checkRes.status === 429) {
+      if (!checkRes.ok) {
+        // Fail CLOSED — this check exists specifically to catch phantom
+        // accounts (a Supabase Auth user with no tutors row) that
+        // sendEmailOTP/sendPhoneOTP's own shouldCreateUser:false check
+        // cannot see. Proceeding on a check failure would silently let
+        // that exact case through.
         setLoading(false)
-        setError(checkData.error ?? 'Too many requests. Please wait before trying again.')
+        setError(checkData.error ?? 'Could not verify account. Please try again.')
         return
       }
-      // Any other check failure (network error, 5xx) — fail open and let
-      // sendEmailOTP/sendPhoneOTP's own existence check catch it downstream.
     } catch {
-      // Network error reaching check-account — fail open, same reasoning.
+      // Network error reaching check-account — fail closed, same reasoning.
+      setLoading(false)
+      setError('Could not verify account. Please check your connection and try again.')
+      return
     }
 
     const result = method === 'phone'

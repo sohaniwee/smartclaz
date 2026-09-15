@@ -1,11 +1,13 @@
 'use client'
 
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import {
   GraduationCap, UserPen, Plug2, BotMessageSquare,
   MessageCircle, Link2, AlarmClock, LayoutDashboard,
   Mail,
 } from 'lucide-react'
+import { createClient } from '@/lib/supabase/client'
 
 const steps = [
   { count: '01', icon: UserPen, title: 'Set up your profile', desc: 'Add your subjects, fees, availability, and payment details in minutes.' },
@@ -71,6 +73,8 @@ const iconBoxBase = 'relative overflow-hidden w-[58px] h-[58px] rounded-[16px] g
 const iconBoxIdle = 'text-[#3b5bdb] border border-[rgba(59,91,219,0.16)]'
 
 export default function LandingPage() {
+  const router = useRouter()
+
   return (
     <div style={{ fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif", color: '#0e1f3b', background: '#fff', lineHeight: 1.5, WebkitFontSmoothing: 'antialiased' }}>
 
@@ -131,8 +135,17 @@ export default function LandingPage() {
             {/* Divider — desktop only */}
             <div className="hidden md:block w-px h-5 mx-1" style={{ background: '#e0e4ed' }} />
 
-            <Link
-              href="/login"
+            <button
+              type="button"
+              onClick={async () => {
+                // Sign out any lingering session from a previous, incomplete
+                // signup attempt FIRST — proxy.ts redirects a logged-in user
+                // away from /login back to their in-progress signup step, so
+                // without this, clicking "Log in" here can silently bounce
+                // straight to /signup instead of reaching the login form.
+                await createClient().auth.signOut()
+                router.push('/login')
+              }}
               className="hidden md:inline-flex items-center font-semibold text-[14px] rounded-[8px] px-4 py-[9px] transition-all duration-150"
               style={{ color: '#0e1f3b' }}
               onMouseEnter={e => {
@@ -145,7 +158,7 @@ export default function LandingPage() {
               }}
             >
               Log in
-            </Link>
+            </button>
 
             <Link
               href="/signup"
