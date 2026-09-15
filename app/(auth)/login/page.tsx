@@ -165,6 +165,34 @@ function LoginInner() {
     setLoading(true)
     setError('')
 
+    // Check the actual tutors table first, not just Supabase Auth existence.
+    // An earlier abandoned signup attempt can leave a Supabase Auth user with
+    // no tutors row behind — sendEmailOTP/sendPhoneOTP's shouldCreateUser:false
+    // check alone would find that leftover Auth user and let the OTP through,
+    // even though there's no real account to log into.
+    try {
+      const checkRes = await fetch('/api/auth/check-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(method === 'phone' ? { phone: fullPhone } : { email: email.trim() }),
+      })
+      const checkData = await checkRes.json()
+      if (checkRes.ok && checkData.exists === false) {
+        setLoading(false)
+        setError(`No account found with this ${method === 'phone' ? 'phone number' : 'email'}. Please sign up first.`)
+        return
+      }
+      if (!checkRes.ok && checkRes.status === 429) {
+        setLoading(false)
+        setError(checkData.error ?? 'Too many requests. Please wait before trying again.')
+        return
+      }
+      // Any other check failure (network error, 5xx) — fail open and let
+      // sendEmailOTP/sendPhoneOTP's own existence check catch it downstream.
+    } catch {
+      // Network error reaching check-account — fail open, same reasoning.
+    }
+
     const result = method === 'phone'
       ? await sendPhoneOTP(fullPhone)
       : await sendEmailOTP(email.trim(), false)
