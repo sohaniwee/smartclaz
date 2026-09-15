@@ -167,7 +167,7 @@ function LoginInner() {
 
     const result = method === 'phone'
       ? await sendPhoneOTP(fullPhone)
-      : await sendEmailOTP(email.trim())
+      : await sendEmailOTP(email.trim(), false)
 
     if (!result.success) {
       setLoading(false)
@@ -198,7 +198,7 @@ function LoginInner() {
 
     const result = method === 'phone'
       ? await sendPhoneOTP(fullPhone)
-      : await sendEmailOTP(email.trim())
+      : await sendEmailOTP(email.trim(), false)
 
     if (!result.success) {
       setError(result.error)

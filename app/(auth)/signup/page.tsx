@@ -645,8 +645,13 @@ export default function SignupPage() {
               Already have an account?{' '}
               <button
                 type="button"
-                onClick={() => {
-                  // Clear any partial signup data before navigating to login
+                onClick={async () => {
+                  // Sign out any lingering session from a previous, incomplete
+                  // signup attempt FIRST — proxy.ts redirects a logged-in user
+                  // away from /login back to their in-progress signup step, so
+                  // without this, clicking "Login" here just silently bounces
+                  // straight back and looks like the link does nothing.
+                  await createClient().auth.signOut()
                   localStorage.removeItem('sc_signup_name')
                   localStorage.removeItem('sc_signup_email')
                   localStorage.removeItem('sc_signup_phone')

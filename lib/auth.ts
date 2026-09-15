@@ -368,6 +368,15 @@ export async function sendPhoneOTP(phone: string): Promise<OtpResult> {
       if (error.message.toLowerCase().includes('rate')) {
         return { success: false, error: 'Too many OTP requests. Please wait before trying again.' }
       }
+      // shouldCreateUser: false means Supabase rejects the send outright when
+      // no account matches this phone — GoTrue's stock error text for this
+      // case is "Signups not allowed for otp". Surface that distinctly so
+      // the tutor is told to sign up instead of just seeing a generic
+      // "couldn't send" message with no OTP ever having gone out.
+      if (error.message.toLowerCase().includes('signups not allowed')) {
+        logEvent(null, 'otp_failed')
+        return { success: false, error: 'No account found with this phone number. Please sign up first.' }
+      }
       // "Invalid phone number", "phone not enabled", etc.
       logEvent(null, 'otp_failed')
       return { success: false, error: 'Could not send SMS. Please check your number or use email login.' }
@@ -433,7 +442,13 @@ export async function verifyPhoneOTP(phone: string, token: string): Promise<Veri
  * Send an email OTP via Supabase built-in email service.
  * No SMTP or Twilio needed in development.
  *
- * Supabase signInWithOtp is enumeration-safe by design — it does not reveal if the email exists.
+ * @param shouldCreateUser - true (default) for signup/recovery, where creating
+ *   a new Supabase Auth user on first OTP send is exactly what's wanted, and
+ *   staying enumeration-safe (never revealing whether the email already has
+ *   an account) matters. Pass false for login, where — same as sendPhoneOTP —
+ *   the tutor must already have an account: Supabase then refuses to send an
+ *   OTP for an unknown email instead of silently creating a blank account
+ *   that only gets discovered post-verification with nowhere to go but signup.
  *
  * NOTE: Set OTP expiry in Supabase dashboard:
  * Authentication → Settings → OTP Expiry = 600 (10 minutes)
@@ -441,7 +456,7 @@ export async function verifyPhoneOTP(phone: string, token: string): Promise<Veri
  * 🚀 BEFORE LAUNCH — Replace with phone OTP: supabase.auth.signInWithOtp({ phone: tutorPhone })
  * See the file-level comment at the top of this file for full migration steps.
  */
-export async function sendEmailOTP(email: string): Promise<OtpResult> {
+export async function sendEmailOTP(email: string, shouldCreateUser = true): Promise<OtpResult> {
   // Check per-hour OTP send limit before hitting Supabase
   const rec = getAttemptRecord(email)
   if (rec.otpCount >= MAX_OTP_PER_HOUR) {
@@ -459,7 +474,7 @@ export async function sendEmailOTP(email: string): Promise<OtpResult> {
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: {
-        shouldCreateUser: true,
+        shouldCreateUser,
         emailRedirectTo: undefined,
         // ✅ emailRedirectTo: undefined forces a 6-digit OTP code
         // instead of a clickable magic link email
@@ -476,10 +491,19 @@ export async function sendEmailOTP(email: string): Promise<OtpResult> {
         }
       }
 
-      // Any other Supabase error during signup OTP means the account already
-      // exists in Supabase Auth (e.g. "User already registered", email provider
-      // errors for confirmed users, etc.). Signal this explicitly so the UI
-      // can show a clear "account exists — please log in" message.
+      // shouldCreateUser: false (login) — Supabase rejects the send outright
+      // when no account matches this email. GoTrue's stock error text for
+      // this case is "Signups not allowed for otp".
+      if (!shouldCreateUser && error.message.toLowerCase().includes('signups not allowed')) {
+        logEvent(null, 'otp_failed')
+        return { success: false, error: 'No account found with this email. Please sign up first.' }
+      }
+
+      // shouldCreateUser: true (signup/recovery) — any other error means the
+      // account already exists in Supabase Auth (e.g. "User already
+      // registered", email provider errors for confirmed users, etc.).
+      // Signal this explicitly so the UI can show a clear
+      // "account exists — please log in" message.
       logEvent(null, 'otp_failed')
       return {
         success: false,

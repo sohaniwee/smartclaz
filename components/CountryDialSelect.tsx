@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import Image from 'next/image'
 import { COUNTRIES, findCountry } from '@/lib/countries'
 
 type Props = {
@@ -50,12 +49,12 @@ export function CountryDialSelect({ value, onChange, hasError }: Props) {
             : 'border-[#ced4da] focus:border-[#3b5bdb] focus:ring-[rgba(59,91,219,0.12)]'
         }`}
       >
-        <Image
+        {/* eslint-disable-next-line @next/next/no-img-element -- tiny external flag icon, no benefit from next/image optimization */}
+        <img
           src={`https://flagcdn.com/w20/${selected.code.toLowerCase()}.png`}
           alt={selected.name}
           width={20}
           height={14}
-          style={{ width: 20, height: 'auto' }}
           className="rounded-[2px] flex-shrink-0"
         />
         <span className="text-[#1a1a2e] font-medium">{selected.dialCode}</span>
@@ -90,12 +89,12 @@ export function CountryDialSelect({ value, onChange, hasError }: Props) {
                   c.code === value ? 'bg-[#edf2ff]' : ''
                 }`}
               >
-                <Image
+                {/* eslint-disable-next-line @next/next/no-img-element -- tiny external flag icon, no benefit from next/image optimization */}
+                <img
                   src={`https://flagcdn.com/w20/${c.code.toLowerCase()}.png`}
                   alt={c.name}
                   width={20}
                   height={14}
-                  style={{ width: 20, height: 'auto' }}
                   className="rounded-[2px] flex-shrink-0"
                 />
                 <span className="flex-1 text-[#1a1a2e] font-medium">{c.name}</span>
